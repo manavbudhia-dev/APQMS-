@@ -724,16 +724,6 @@ class ProformaPagesMixin:
     refresh();
   }});
 
-  document.getElementById('piDateInput').addEventListener('click', function(e) {{
-    // Clicking the button only focuses the (invisible) native date field
-    // unless the click happens to land exactly on its tiny built-in
-    // calendar glyph, so most clicks did nothing. Force the picker open
-    // explicitly instead of relying on that.
-    if (typeof this.showPicker === 'function') {{
-      try {{ this.showPicker(); }} catch (err) {{}}
-    }}
-  }});
-
   document.getElementById('piDateInput').addEventListener('change', function(e) {{
     if (!e.target.value) return;
     var d = new Date(e.target.value + 'T00:00:00');

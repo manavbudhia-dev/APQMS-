@@ -87,12 +87,14 @@ class RoutingMixin:
          lambda self, m, qs, uid: self.send(*html_response(
              self.pg_salary_list(qs.get('month', [None])[0])))),
         (re.compile(r'^/salary/new$'),
-         lambda self, m, qs, uid: self.send(*html_response(self.pg_salary_new()))),
+         lambda self, m, qs, uid: self.send(*html_response(
+             self.pg_salary_new(qs.get('month', [None])[0])))),
         (re.compile(r'^/salary/(\d+)/attendance$'),
          lambda self, m, qs, uid: self.send(*html_response(
              self.pg_salary_attendance(_id(m), qs.get('month', [None])[0])))),
         (re.compile(r'^/salary/(\d+)/edit$'),
-         lambda self, m, qs, uid: self.send(*html_response(self.pg_salary_edit(_id(m))))),
+         lambda self, m, qs, uid: self.send(*html_response(
+             self.pg_salary_edit(_id(m), qs.get('month', [None])[0])))),
         (re.compile(r'^/salary/(\d+)$'),
          lambda self, m, qs, uid: self.send(*html_response(
              self.pg_salary_detail(_id(m), qs.get('month', [None])[0])))),

@@ -230,10 +230,7 @@ class DashboardPagesMixin:
             <option value="confirmed">Confirmed</option>
             <option value="cancelled">Cancelled</option>
           </select>
-          <button type="button" class="icon-btn-sm q-date-btn" style="position:relative;overflow:hidden" title="Filter by date">
-            <i class="bi bi-calendar3"></i>
-            <input type="date" id="quotationDateFilter" aria-label="Filter by date" style="position:absolute;inset:0;width:100%;height:100%;opacity:0;border:none;padding:0;cursor:pointer">
-          </button>
+          <button type="button" class="icon-btn-sm" style="cursor:not-allowed" disabled title="Date range filter (coming soon)"><i class="bi bi-calendar3"></i></button>
         </div>
       </div>
       <div class="table-responsive-wrapper">
@@ -308,35 +305,17 @@ class DashboardPagesMixin:
 (function () {{
   var searchInput = document.getElementById('quotationSearch');
   var statusSelect = document.getElementById('quotationStatusFilter');
-  var dateFilter = document.getElementById('quotationDateFilter');
   function applyFilter() {{
     var term = (searchInput && searchInput.value || '').toLowerCase();
     var status = (statusSelect && statusSelect.value || '').toLowerCase();
-    // Row dates are stored/displayed as "DD - MM - YYYY"; the native
-    // picker gives "YYYY-MM-DD", so build the same display string to
-    // match against rather than trying to parse the row's text back out.
-    var datePick = '';
-    if (dateFilter && dateFilter.value) {{
-      var parts = dateFilter.value.split('-');
-      datePick = parts[2] + ' - ' + parts[1] + ' - ' + parts[0];
-    }}
     document.querySelectorAll('#quotationsTable .quotation-row').forEach(function (row) {{
       var matchesText = row.textContent.toLowerCase().includes(term);
       var matchesStatus = !status || row.dataset.status === status;
-      var matchesDate = !datePick || row.textContent.indexOf(datePick) !== -1;
-      row.style.display = (matchesText && matchesStatus && matchesDate) ? '' : 'none';
+      row.style.display = (matchesText && matchesStatus) ? '' : 'none';
     }});
   }}
   searchInput && searchInput.addEventListener('input', applyFilter);
   statusSelect && statusSelect.addEventListener('change', applyFilter);
-  if (dateFilter) {{
-    dateFilter.addEventListener('click', function () {{
-      if (typeof this.showPicker === 'function') {{
-        try {{ this.showPicker(); }} catch (err) {{}}
-      }}
-    }});
-    dateFilter.addEventListener('change', applyFilter);
-  }}
 
   if (window.Chart) {{
     var revCtx = document.getElementById('revChart');

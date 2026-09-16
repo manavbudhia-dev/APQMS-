@@ -71,55 +71,20 @@ class BaseMixin:
 
         # Draft count powers the header notification badge — a real,
         # cheap signal ("N drafts still need attention") rather than a
-        # decorative always-empty bell. The bell also opens a dropdown
-        # listing the actual drafts so clicking it does something.
-        draft_count = 0
-        notif_rows = []
+        # decorative always-empty bell.
         try:
             db = get_db()
             draft_count = db.execute(
                 "SELECT COUNT(*) c FROM quotations WHERE status='Draft'").fetchone()['c']
-            notif_rows = db.execute(
-                "SELECT q.id, q.quotation_no, q.date, c.company_name "
-                "FROM quotations q LEFT JOIN customers c ON q.customer_id=c.id "
-                "WHERE q.status='Draft' ORDER BY q.created_at DESC LIMIT 5").fetchall()
             db.close()
         except Exception:
             draft_count = 0
-            notif_rows = []
         badge_html = ''
         if draft_count > 0:
             badge_text = '9+' if draft_count > 9 else str(draft_count)
             badge_html = f'<span class="notif-badge">{badge_text}</span>'
         bell_title = (f'{draft_count} draft quotation{"s" if draft_count != 1 else ""} need attention'
                       if draft_count > 0 else 'No pending drafts')
-
-        if notif_rows:
-            items_html = ''
-            for r in notif_rows:
-                company = esc(r['company_name'] or 'No customer')
-                qno = esc(r['quotation_no'] or '')
-                date = esc(r['date'] or '')
-                items_html += (
-                    f'<li><a class="dropdown-item notif-item" href="/quotations/{r["id"]}">'
-                    f'<i class="bi bi-file-earmark-text"></i>'
-                    f'<span class="notif-item-text">'
-                    f'<span class="notif-item-title">{qno} &middot; {company}</span>'
-                    f'<span class="notif-item-sub">Draft &middot; {date}</span>'
-                    f'</span></a></li>')
-        else:
-            items_html = '<li><span class="dropdown-item-text notif-empty">No pending drafts</span></li>'
-        notif_dropdown_html = f'''<div class="dropdown">
-          <button type="button" class="topbar-icon-btn" data-bs-toggle="dropdown" aria-expanded="false" title="{esc(bell_title)}" aria-label="Notifications">
-            <i class="bi bi-bell"></i>{badge_html}
-          </button>
-          <ul class="dropdown-menu dropdown-menu-end notif-dropdown">
-            <li><h6 class="dropdown-header">Notifications</h6></li>
-            {items_html}
-            <li><hr class="dropdown-divider"></li>
-            <li><a class="dropdown-item text-center small" href="/quotations?status=Draft">View all drafts</a></li>
-          </ul>
-        </div>'''
 
         initial = esc((full_name or 'U').strip()[:1].upper() or 'U')
         admin_link = ''
@@ -160,7 +125,9 @@ class BaseMixin:
           <input type="text" id="globalSearch" placeholder="Search anything... (quotations, customers, items)" autocomplete="off">
           <kbd>Ctrl K</kbd>
         </label>
-        {notif_dropdown_html}
+        <button type="button" class="topbar-icon-btn" title="{esc(bell_title)}" aria-label="Notifications">
+          <i class="bi bi-bell"></i>{badge_html}
+        </button>
         <div class="dropdown">
           <button class="avatar-chip" type="button" data-bs-toggle="dropdown" aria-expanded="false">
             <span class="avatar-circle">{initial}</span>
@@ -191,74 +158,6 @@ document.addEventListener('keydown', function (e) {{
     if (el) el.focus();
   }}
 }});
-
-// ── DATE PICKERS ─────────────────────────────────────────
-// Every "Date" field in the app (quotations, proforma invoices,
-// packing lists) is a plain text field storing "DD - MM - YYYY".
-// The calendar icon next to it was decorative only. This wires a
-// real native date picker to every input[name="date"]: clicking the
-// field opens the OS/browser calendar, and the picked date is
-// written back in the app's existing "DD - MM - YYYY" format so
-// nothing downstream (storage, PDFs, listings) has to change.
-(function () {{
-  function pad(n) {{ return String(n).padStart(2, '0'); }}
-  function toISO(text) {{
-    if (!text) return '';
-    var m = text.match(/(\\d{{1,2}})\\s*-\\s*(\\d{{1,2}})\\s*-\\s*(\\d{{4}})/);
-    if (m) return m[3] + '-' + pad(m[2]) + '-' + pad(m[1]);
-    var iso = text.match(/^(\\d{{4}})-(\\d{{2}})-(\\d{{2}})$/);
-    return iso ? text : '';
-  }}
-  function toDisplay(iso) {{
-    var p = iso.split('-');
-    return p.length === 3 ? (p[2] + ' - ' + p[1] + ' - ' + p[0]) : iso;
-  }}
-  function openPicker(hidden) {{
-    if (typeof hidden.showPicker === 'function') {{
-      try {{ hidden.showPicker(); return; }} catch (e) {{}}
-    }}
-    hidden.focus();
-  }}
-  function initDatePickers() {{
-    document.querySelectorAll('input[name="date"]').forEach(function (txt) {{
-      if (txt.dataset.pickerInit || txt.type === 'date') return;
-      txt.dataset.pickerInit = '1';
-
-      var wrap = txt.parentElement;
-      wrap.classList.add('input-icon');
-      wrap.style.position = 'relative';
-      if (!wrap.querySelector('i.bi-calendar3, i.bi-calendar, i.bi-calendar-event')) {{
-        var icon = document.createElement('i');
-        icon.className = 'bi bi-calendar3';
-        wrap.insertBefore(icon, txt);
-      }}
-
-      var hidden = document.createElement('input');
-      hidden.type = 'date';
-      hidden.tabIndex = -1;
-      hidden.setAttribute('aria-hidden', 'true');
-      hidden.style.cssText = 'position:absolute;inset:0;width:100%;height:100%;' +
-        'opacity:0;border:0;padding:0;margin:0;pointer-events:none;';
-      wrap.appendChild(hidden);
-
-      var iso = toISO(txt.value);
-      if (iso) hidden.value = iso;
-
-      txt.readOnly = true;
-      txt.style.cursor = 'pointer';
-      txt.addEventListener('click', function () {{ openPicker(hidden); }});
-
-      hidden.addEventListener('change', function () {{
-        if (hidden.value) {{
-          txt.value = toDisplay(hidden.value);
-          txt.dispatchEvent(new Event('input', {{ bubbles: true }}));
-          txt.dispatchEvent(new Event('change', {{ bubbles: true }}));
-        }}
-      }});
-    }});
-  }}
-  document.addEventListener('DOMContentLoaded', initDatePickers);
-}})();
 </script>
 </body>
 </html>'''
