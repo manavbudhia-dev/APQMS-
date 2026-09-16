@@ -8,6 +8,7 @@ from utils.http_utils import esc_nl
 from utils.http_utils import fmt_rupee
 from utils.http_utils import redirect
 from utils.http_utils import pdf_response
+from utils.http_utils import html_response
 from database import get_db
 from database import gen_quotation_no
 from app.generators.pdf_generator import build_pdf
@@ -69,18 +70,26 @@ class QuotationPagesMixin:
             f'Could not generate a unique quotation number after '
             f'{max_attempts} attempts') from last_err
 
-    def _render_save_error(self, message, back_url):
+    def _render_save_error(self, message, back_url, active='quotations'):
         """Simple error page for save failures (invalid item data, or a
-        quotation_no collision that survived every retry). Used instead
-        of redirecting to a fake "success" page so problems are always
-        visible to the user rather than silently swallowed."""
+        quotation_no/pi_no collision that survived every retry). Used
+        instead of redirecting to a fake "success" page so problems are
+        always visible to the user rather than silently swallowed.
+        Shared by the quotation and proforma invoice modules — `active`
+        picks which sidebar nav item is highlighted."""
         content = f'''
 <div class="form-section" style="max-width:640px;margin:48px auto;padding:32px">
-  <h5 style="color:#DC2626"><i class="bi bi-exclamation-triangle"></i> Could not save quotation</h5>
+  <h5 style="color:#DC2626"><i class="bi bi-exclamation-triangle"></i> Could not save</h5>
   <p style="margin-top:16px">{message}</p>
   <a href="{back_url}" class="btn btn-primary mt-2"><i class="bi bi-arrow-left"></i> Go back and try again</a>
 </div>'''
-        return self._layout('Error', 'Could Not Save', content, 'quotations')
+        # NB: every caller does `return self._render_save_error(...)`, so
+        # this must actually send the response (not just build/return the
+        # HTML) — returning a bare string here would silently drop the
+        # response, leaving the request hanging with no bytes ever
+        # written to the client.
+        return self.send(*html_response(
+            self._layout('Error', 'Could Not Save', content, active)))
 
     def handle_quotation_create(self, form, user_id):
         db = get_db()
@@ -748,6 +757,16 @@ class QuotationPagesMixin:
     state.pageSize = parseInt(e.target.value, 10) || 10;
     state.page = 1;
     refresh();
+  }});
+
+  document.getElementById('qDateInput').addEventListener('click', function(e) {{
+    // Clicking the button only focuses the (invisible) native date field
+    // unless the click happens to land exactly on its tiny built-in
+    // calendar glyph, so most clicks did nothing. Force the picker open
+    // explicitly instead of relying on that.
+    if (typeof this.showPicker === 'function') {{
+      try {{ this.showPicker(); }} catch (err) {{}}
+    }}
   }});
 
   document.getElementById('qDateInput').addEventListener('change', function(e) {{

@@ -311,7 +311,7 @@ class CustomerPagesMixin:
     var params = new URLSearchParams();
     if (state.q) params.set('q', state.q);
     params.set('page', state.page);
-    fetch('/api/customers/search?' + params.toString())
+    fetch('/api/customers?' + params.toString())
       .then(function(r) {{ return r.json(); }})
       .then(function(data) {{
         tbody.innerHTML = data.rows_html;

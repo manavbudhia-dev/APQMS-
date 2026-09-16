@@ -71,20 +71,55 @@ class BaseMixin:
 
         # Draft count powers the header notification badge — a real,
         # cheap signal ("N drafts still need attention") rather than a
-        # decorative always-empty bell.
+        # decorative always-empty bell. The bell also opens a dropdown
+        # listing the actual drafts so clicking it does something.
+        draft_count = 0
+        notif_rows = []
         try:
             db = get_db()
             draft_count = db.execute(
                 "SELECT COUNT(*) c FROM quotations WHERE status='Draft'").fetchone()['c']
+            notif_rows = db.execute(
+                "SELECT q.id, q.quotation_no, q.date, c.company_name "
+                "FROM quotations q LEFT JOIN customers c ON q.customer_id=c.id "
+                "WHERE q.status='Draft' ORDER BY q.created_at DESC LIMIT 5").fetchall()
             db.close()
         except Exception:
             draft_count = 0
+            notif_rows = []
         badge_html = ''
         if draft_count > 0:
             badge_text = '9+' if draft_count > 9 else str(draft_count)
             badge_html = f'<span class="notif-badge">{badge_text}</span>'
         bell_title = (f'{draft_count} draft quotation{"s" if draft_count != 1 else ""} need attention'
                       if draft_count > 0 else 'No pending drafts')
+
+        if notif_rows:
+            items_html = ''
+            for r in notif_rows:
+                company = esc(r['company_name'] or 'No customer')
+                qno = esc(r['quotation_no'] or '')
+                date = esc(r['date'] or '')
+                items_html += (
+                    f'<li><a class="dropdown-item notif-item" href="/quotations/{r["id"]}">'
+                    f'<i class="bi bi-file-earmark-text"></i>'
+                    f'<span class="notif-item-text">'
+                    f'<span class="notif-item-title">{qno} &middot; {company}</span>'
+                    f'<span class="notif-item-sub">Draft &middot; {date}</span>'
+                    f'</span></a></li>')
+        else:
+            items_html = '<li><span class="dropdown-item-text notif-empty">No pending drafts</span></li>'
+        notif_dropdown_html = f'''<div class="dropdown">
+          <button type="button" class="topbar-icon-btn" data-bs-toggle="dropdown" aria-expanded="false" title="{esc(bell_title)}" aria-label="Notifications">
+            <i class="bi bi-bell"></i>{badge_html}
+          </button>
+          <ul class="dropdown-menu dropdown-menu-end notif-dropdown">
+            <li><h6 class="dropdown-header">Notifications</h6></li>
+            {items_html}
+            <li><hr class="dropdown-divider"></li>
+            <li><a class="dropdown-item text-center small" href="/quotations?status=Draft">View all drafts</a></li>
+          </ul>
+        </div>'''
 
         initial = esc((full_name or 'U').strip()[:1].upper() or 'U')
         admin_link = ''
@@ -120,15 +155,12 @@ class BaseMixin:
       <button class="btn btn-sm btn-sidebar-toggle" onclick="document.getElementById('sidebar').classList.toggle('show')"><i class="bi bi-list fs-4"></i></button>
       <h5 class="mb-0">{heading}</h5>
       <div class="topbar-actions">
-        <label class="topbar-search d-none d-md-flex" for="globalSearch" style="position:relative">
+        <label class="topbar-search d-none d-md-flex" for="globalSearch">
           <i class="bi bi-search"></i>
           <input type="text" id="globalSearch" placeholder="Search anything... (quotations, customers, items)" autocomplete="off">
           <kbd>Ctrl K</kbd>
-          <div id="globalSearchResults" class="global-search-results d-none"></div>
         </label>
-        <button type="button" class="topbar-icon-btn" title="{esc(bell_title)}" aria-label="Notifications">
-          <i class="bi bi-bell"></i>{badge_html}
-        </button>
+        {notif_dropdown_html}
         <div class="dropdown">
           <button class="avatar-chip" type="button" data-bs-toggle="dropdown" aria-expanded="false">
             <span class="avatar-circle">{initial}</span>
@@ -160,121 +192,72 @@ document.addEventListener('keydown', function (e) {{
   }}
 }});
 
-(function() {{
-  var input = document.getElementById('globalSearch');
-  var panel = document.getElementById('globalSearchResults');
-  if (!input || !panel) return;
-
-  // If the current page has its own live-filtering search box (the
-  // quotations/customers/items list pages all do), typing in the global
-  // box also drives that box, so the page's table filters live too --
-  // no need to duplicate each page's own search logic here.
-  var LOCAL_INPUT_IDS = ['qSearchInput', 'custSearchInput', 'itemSearch'];
-
-  function localInput() {{
-    for (var i = 0; i < LOCAL_INPUT_IDS.length; i++) {{
-      var el = document.getElementById(LOCAL_INPUT_IDS[i]);
-      if (el) return el;
-    }}
-    return null;
+// ── DATE PICKERS ─────────────────────────────────────────
+// Every "Date" field in the app (quotations, proforma invoices,
+// packing lists) is a plain text field storing "DD - MM - YYYY".
+// The calendar icon next to it was decorative only. This wires a
+// real native date picker to every input[name="date"]: clicking the
+// field opens the OS/browser calendar, and the picked date is
+// written back in the app's existing "DD - MM - YYYY" format so
+// nothing downstream (storage, PDFs, listings) has to change.
+(function () {{
+  function pad(n) {{ return String(n).padStart(2, '0'); }}
+  function toISO(text) {{
+    if (!text) return '';
+    var m = text.match(/(\\d{{1,2}})\\s*-\\s*(\\d{{1,2}})\\s*-\\s*(\\d{{4}})/);
+    if (m) return m[3] + '-' + pad(m[2]) + '-' + pad(m[1]);
+    var iso = text.match(/^(\\d{{4}})-(\\d{{2}})-(\\d{{2}})$/);
+    return iso ? text : '';
   }}
-
-  function syncLocal(value) {{
-    var el = localInput();
-    if (!el || el === input) return;
-    el.value = value;
-    el.dispatchEvent(new Event('input', {{ bubbles: true }}));
+  function toDisplay(iso) {{
+    var p = iso.split('-');
+    return p.length === 3 ? (p[2] + ' - ' + p[1] + ' - ' + p[0]) : iso;
   }}
-
-  var ICONS = {{
-    quotation: 'bi-file-earmark-text', customer: 'bi-people',
-    item: 'bi-box-seam', proforma: 'bi-receipt', packing: 'bi-box-seam'
-  }};
-  var GROUP_LABELS = {{
-    quotation: 'Quotations', customer: 'Customers', item: 'Items',
-    proforma: 'Proforma Invoices', packing: 'Packing Lists'
-  }};
-
-  function renderResults(results) {{
-    if (!results.length) {{
-      panel.innerHTML = '<div class="global-search-empty">No matches found</div>';
-      panel.classList.remove('d-none');
-      return;
+  function openPicker(hidden) {{
+    if (typeof hidden.showPicker === 'function') {{
+      try {{ hidden.showPicker(); return; }} catch (e) {{}}
     }}
-    var byType = {{}};
-    results.forEach(function(r) {{
-      (byType[r.type] = byType[r.type] || []).push(r);
-    }});
-    var html = '';
-    Object.keys(byType).forEach(function(type) {{
-      html += '<div class="global-search-group-label">' + GROUP_LABELS[type] + '</div>';
-      byType[type].forEach(function(r) {{
-        html += '<a class="global-search-item" href="' + r.url + '">' +
-          '<i class="bi ' + (ICONS[type] || 'bi-search') + ' gs-icon"></i>' +
-          '<div class="min-w-0"><div class="gs-title">' + escapeHtml(r.title) + '</div>' +
-          (r.subtitle ? '<div class="gs-subtitle">' + escapeHtml(r.subtitle) + '</div>' : '') +
-          '</div></a>';
+    hidden.focus();
+  }}
+  function initDatePickers() {{
+    document.querySelectorAll('input[name="date"]').forEach(function (txt) {{
+      if (txt.dataset.pickerInit || txt.type === 'date') return;
+      txt.dataset.pickerInit = '1';
+
+      var wrap = txt.parentElement;
+      wrap.classList.add('input-icon');
+      wrap.style.position = 'relative';
+      if (!wrap.querySelector('i.bi-calendar3, i.bi-calendar, i.bi-calendar-event')) {{
+        var icon = document.createElement('i');
+        icon.className = 'bi bi-calendar3';
+        wrap.insertBefore(icon, txt);
+      }}
+
+      var hidden = document.createElement('input');
+      hidden.type = 'date';
+      hidden.tabIndex = -1;
+      hidden.setAttribute('aria-hidden', 'true');
+      hidden.style.cssText = 'position:absolute;inset:0;width:100%;height:100%;' +
+        'opacity:0;border:0;padding:0;margin:0;pointer-events:none;';
+      wrap.appendChild(hidden);
+
+      var iso = toISO(txt.value);
+      if (iso) hidden.value = iso;
+
+      txt.readOnly = true;
+      txt.style.cursor = 'pointer';
+      txt.addEventListener('click', function () {{ openPicker(hidden); }});
+
+      hidden.addEventListener('change', function () {{
+        if (hidden.value) {{
+          txt.value = toDisplay(hidden.value);
+          txt.dispatchEvent(new Event('input', {{ bubbles: true }}));
+          txt.dispatchEvent(new Event('change', {{ bubbles: true }}));
+        }}
       }});
     }});
-    panel.innerHTML = html;
-    panel.classList.remove('d-none');
   }}
-
-  function escapeHtml(s) {{
-    var d = document.createElement('div');
-    d.textContent = s == null ? '' : String(s);
-    return d.innerHTML;
-  }}
-
-  var debounceTimer = null;
-  var lastResults = [];
-
-  function runSearch(value) {{
-    if (value.length < 2) {{
-      panel.classList.add('d-none');
-      lastResults = [];
-      return;
-    }}
-    fetch('/api/search?q=' + encodeURIComponent(value))
-      .then(function(r) {{ return r.json(); }})
-      .then(function(data) {{
-        lastResults = data.results || [];
-        renderResults(lastResults);
-      }})
-      .catch(function() {{ panel.classList.add('d-none'); }});
-  }}
-
-  input.addEventListener('input', function(e) {{
-    var value = e.target.value;
-    syncLocal(value);
-    clearTimeout(debounceTimer);
-    debounceTimer = setTimeout(function() {{ runSearch(value); }}, 250);
-  }});
-
-  input.addEventListener('keydown', function(e) {{
-    if (e.key === 'Enter') {{
-      e.preventDefault();
-      clearTimeout(debounceTimer);
-      if (lastResults.length) {{
-        window.location.href = lastResults[0].url;
-      }}
-    }} else if (e.key === 'Escape') {{
-      panel.classList.add('d-none');
-      input.blur();
-    }}
-  }});
-
-  input.addEventListener('focus', function() {{
-    if (lastResults.length && input.value.trim().length >= 2) {{
-      panel.classList.remove('d-none');
-    }}
-  }});
-
-  document.addEventListener('click', function(e) {{
-    if (!panel.contains(e.target) && e.target !== input) {{
-      panel.classList.add('d-none');
-    }}
-  }});
+  document.addEventListener('DOMContentLoaded', initDatePickers);
 }})();
 </script>
 </body>
