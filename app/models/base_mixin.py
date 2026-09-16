@@ -120,10 +120,11 @@ class BaseMixin:
       <button class="btn btn-sm btn-sidebar-toggle" onclick="document.getElementById('sidebar').classList.toggle('show')"><i class="bi bi-list fs-4"></i></button>
       <h5 class="mb-0">{heading}</h5>
       <div class="topbar-actions">
-        <label class="topbar-search d-none d-md-flex" for="globalSearch">
+        <label class="topbar-search d-none d-md-flex" for="globalSearch" style="position:relative">
           <i class="bi bi-search"></i>
           <input type="text" id="globalSearch" placeholder="Search anything... (quotations, customers, items)" autocomplete="off">
           <kbd>Ctrl K</kbd>
+          <div id="globalSearchResults" class="global-search-results d-none"></div>
         </label>
         <button type="button" class="topbar-icon-btn" title="{esc(bell_title)}" aria-label="Notifications">
           <i class="bi bi-bell"></i>{badge_html}
@@ -158,6 +159,123 @@ document.addEventListener('keydown', function (e) {{
     if (el) el.focus();
   }}
 }});
+
+(function() {{
+  var input = document.getElementById('globalSearch');
+  var panel = document.getElementById('globalSearchResults');
+  if (!input || !panel) return;
+
+  // If the current page has its own live-filtering search box (the
+  // quotations/customers/items list pages all do), typing in the global
+  // box also drives that box, so the page's table filters live too --
+  // no need to duplicate each page's own search logic here.
+  var LOCAL_INPUT_IDS = ['qSearchInput', 'custSearchInput', 'itemSearch'];
+
+  function localInput() {{
+    for (var i = 0; i < LOCAL_INPUT_IDS.length; i++) {{
+      var el = document.getElementById(LOCAL_INPUT_IDS[i]);
+      if (el) return el;
+    }}
+    return null;
+  }}
+
+  function syncLocal(value) {{
+    var el = localInput();
+    if (!el || el === input) return;
+    el.value = value;
+    el.dispatchEvent(new Event('input', {{ bubbles: true }}));
+  }}
+
+  var ICONS = {{
+    quotation: 'bi-file-earmark-text', customer: 'bi-people',
+    item: 'bi-box-seam', proforma: 'bi-receipt', packing: 'bi-box-seam'
+  }};
+  var GROUP_LABELS = {{
+    quotation: 'Quotations', customer: 'Customers', item: 'Items',
+    proforma: 'Proforma Invoices', packing: 'Packing Lists'
+  }};
+
+  function renderResults(results) {{
+    if (!results.length) {{
+      panel.innerHTML = '<div class="global-search-empty">No matches found</div>';
+      panel.classList.remove('d-none');
+      return;
+    }}
+    var byType = {{}};
+    results.forEach(function(r) {{
+      (byType[r.type] = byType[r.type] || []).push(r);
+    }});
+    var html = '';
+    Object.keys(byType).forEach(function(type) {{
+      html += '<div class="global-search-group-label">' + GROUP_LABELS[type] + '</div>';
+      byType[type].forEach(function(r) {{
+        html += '<a class="global-search-item" href="' + r.url + '">' +
+          '<i class="bi ' + (ICONS[type] || 'bi-search') + ' gs-icon"></i>' +
+          '<div class="min-w-0"><div class="gs-title">' + escapeHtml(r.title) + '</div>' +
+          (r.subtitle ? '<div class="gs-subtitle">' + escapeHtml(r.subtitle) + '</div>' : '') +
+          '</div></a>';
+      }});
+    }});
+    panel.innerHTML = html;
+    panel.classList.remove('d-none');
+  }}
+
+  function escapeHtml(s) {{
+    var d = document.createElement('div');
+    d.textContent = s == null ? '' : String(s);
+    return d.innerHTML;
+  }}
+
+  var debounceTimer = null;
+  var lastResults = [];
+
+  function runSearch(value) {{
+    if (value.length < 2) {{
+      panel.classList.add('d-none');
+      lastResults = [];
+      return;
+    }}
+    fetch('/api/search?q=' + encodeURIComponent(value))
+      .then(function(r) {{ return r.json(); }})
+      .then(function(data) {{
+        lastResults = data.results || [];
+        renderResults(lastResults);
+      }})
+      .catch(function() {{ panel.classList.add('d-none'); }});
+  }}
+
+  input.addEventListener('input', function(e) {{
+    var value = e.target.value;
+    syncLocal(value);
+    clearTimeout(debounceTimer);
+    debounceTimer = setTimeout(function() {{ runSearch(value); }}, 250);
+  }});
+
+  input.addEventListener('keydown', function(e) {{
+    if (e.key === 'Enter') {{
+      e.preventDefault();
+      clearTimeout(debounceTimer);
+      if (lastResults.length) {{
+        window.location.href = lastResults[0].url;
+      }}
+    }} else if (e.key === 'Escape') {{
+      panel.classList.add('d-none');
+      input.blur();
+    }}
+  }});
+
+  input.addEventListener('focus', function() {{
+    if (lastResults.length && input.value.trim().length >= 2) {{
+      panel.classList.remove('d-none');
+    }}
+  }});
+
+  document.addEventListener('click', function(e) {{
+    if (!panel.contains(e.target) && e.target !== input) {{
+      panel.classList.add('d-none');
+    }}
+  }});
+}})();
 </script>
 </body>
 </html>'''

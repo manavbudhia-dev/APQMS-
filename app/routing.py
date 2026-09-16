@@ -67,7 +67,8 @@ class RoutingMixin:
 
         # Customers
         (re.compile(r'^/customers$'),
-         lambda self, m, qs, uid: self.send(*html_response(self.pg_customers()))),
+         lambda self, m, qs, uid: self.send(*html_response(self.pg_customers(
+             q=qs.get('q', [''])[0], page=qs.get('page', ['1'])[0])))),
         (re.compile(r'^/customers/(\d+)/products$'),
          lambda self, m, qs, uid: self.send(*html_response(self.pg_customer_products(_id(m))))),
 
@@ -155,6 +156,8 @@ class RoutingMixin:
          lambda self, m, qs, uid: self.send(*json_response(self._api_list_items(qs)))),
         (re.compile(r'^/api/customers$'),
          lambda self, m, qs, uid: self.send(*json_response(self._api_list_customers(qs)))),
+        (re.compile(r'^/api/customers/search$'),
+         lambda self, m, qs, uid: self.send(*json_response(self._api_customers_search(qs)))),
         (re.compile(r'^/api/customers/(\d+)/items$'),
          lambda self, m, qs, uid: self.send(*json_response(self._api_customer_items(_id(m))))),
         (re.compile(r'^/api/categories$'),
@@ -415,6 +418,16 @@ class RoutingMixin:
             rate_min=_first('rate_min'), rate_max=_first('rate_max'),
             page_size=_first('page_size', '10'))
 
+    def _api_customers_search(self, qs):
+        # Thin adapter (mirrors `_api_items_search`): the customers page's
+        # live search/pagination posts here and expects the fragment shape
+        # `_customers_fragment` returns (rows_html/pagination_html/etc.),
+        # not the plain row array `_api_list_customers` returns for
+        # `/api/customers` -- those two are different consumers.
+        def _first(key, default=''):
+            return qs.get(key, [default])[0]
+        return self._customers_fragment(q=_first('q'), page=_first('page', '1'))
+
     def _api_proforma_items(self, pid):
         db = get_db()
         try:
@@ -425,6 +438,74 @@ class RoutingMixin:
             pi = db.execute(
                 "SELECT customer_id FROM proforma_invoices WHERE id=?", (pid,)).fetchone()
             return {'items': items, 'customer_id': pi['customer_id'] if pi else None}
+        finally:
+            db.close()
+
+    def api_search(self, q):
+        """Backs the global topbar search box (`/api/search?q=...`).
+
+        Looks across quotations, customers, items, proforma invoices and
+        packing lists for a loose match and returns a small, capped list
+        per category so the dropdown stays fast and scannable. Customers
+        and items don't have their own detail pages, so they link back to
+        their list page pre-filtered by `?q=` (which those pages already
+        know how to render) rather than a 404.
+        """
+        q = (q or '').strip()
+        if len(q) < 2:
+            return {'results': []}
+        like = f'%{q}%'
+        db = get_db()
+        try:
+            results = []
+            for r in db.execute(
+                "SELECT q.id, q.quotation_no, q.subject, c.company_name "
+                "FROM quotations q LEFT JOIN customers c ON q.customer_id = c.id "
+                "WHERE q.quotation_no LIKE ? OR q.subject LIKE ? OR c.company_name LIKE ? "
+                "ORDER BY q.created_at DESC LIMIT 5", (like, like, like)).fetchall():
+                subtitle = ' — '.join(p for p in (r['company_name'], r['subject']) if p)
+                results.append({
+                    'type': 'quotation', 'icon': 'bi-file-earmark-text',
+                    'title': r['quotation_no'], 'subtitle': subtitle,
+                    'url': f"/quotations/{r['id']}",
+                })
+            for r in db.execute(
+                "SELECT id, company_name, contact_person FROM customers "
+                "WHERE company_name LIKE ? OR contact_person LIKE ? "
+                "ORDER BY company_name LIMIT 5", (like, like)).fetchall():
+                results.append({
+                    'type': 'customer', 'icon': 'bi-people',
+                    'title': r['company_name'], 'subtitle': r['contact_person'] or '',
+                    'url': '/customers?' + urllib.parse.urlencode({'q': r['company_name']}),
+                })
+            for r in db.execute(
+                "SELECT id, item_name, description FROM items "
+                "WHERE item_name LIKE ? OR description LIKE ? "
+                "ORDER BY item_name LIMIT 5", (like, like)).fetchall():
+                results.append({
+                    'type': 'item', 'icon': 'bi-box-seam',
+                    'title': r['item_name'], 'subtitle': r['description'] or '',
+                    'url': '/items?' + urllib.parse.urlencode({'q': r['item_name']}),
+                })
+            for r in db.execute(
+                "SELECT id, pi_no, subject FROM proforma_invoices "
+                "WHERE pi_no LIKE ? OR subject LIKE ? "
+                "ORDER BY created_at DESC LIMIT 5", (like, like)).fetchall():
+                results.append({
+                    'type': 'proforma', 'icon': 'bi-receipt',
+                    'title': r['pi_no'], 'subtitle': r['subject'] or '',
+                    'url': f"/proforma/{r['id']}",
+                })
+            for r in db.execute(
+                "SELECT id, pl_no, subject FROM packing_lists "
+                "WHERE pl_no LIKE ? OR subject LIKE ? "
+                "ORDER BY created_at DESC LIMIT 5", (like, like)).fetchall():
+                results.append({
+                    'type': 'packing', 'icon': 'bi-box-seam',
+                    'title': r['pl_no'], 'subtitle': r['subject'] or '',
+                    'url': f"/packing/{r['id']}",
+                })
+            return {'results': results}
         finally:
             db.close()
 
