@@ -1,0 +1,253 @@
+{% extends "base.html" %}
+{% block title %}New Quotation — Aypee Quotation System{% endblock %}
+{% block page_title %}Create New Quotation{% endblock %}
+{% block content %}
+<form method="POST" id="quotationForm">
+<div class="row g-3">
+  <!-- LEFT: Form -->
+  <div class="col-lg-7">
+    <div class="form-section mb-3">
+      <h5><i class="bi bi-info-circle"></i> Quotation Info</h5>
+      <div class="row g-2">
+        <div class="col-md-4">
+          <label class="form-label">Quotation No</label>
+          <input type="text" class="form-control" value="{{ qno }}" readonly style="background:#f8f9fa">
+        </div>
+        <div class="col-md-4">
+          <label class="form-label">Date</label>
+          <input name="date" type="text" class="form-control" value="{{ today }}">
+        </div>
+        <div class="col-md-4">
+          <label class="form-label">Status</label>
+          <input type="text" class="form-control" value="Draft" readonly style="background:#f8f9fa">
+        </div>
+      </div>
+    </div>
+
+    <div class="form-section mb-3">
+      <h5><i class="bi bi-person"></i> Customer</h5>
+      <select name="customer_id" class="form-select" id="customerSelect" onchange="fillCustomer()">
+        <option value="">— Select Customer —</option>
+        {% for c in customers %}
+        <option value="{{ c.id }}" data-name="{{ c.contact_person }}" data-company="{{ c.company_name }}" data-address="{{ c.address or '' }}">
+          {{ c.company_name }} ({{ c.contact_person }})
+        </option>
+        {% endfor %}
+      </select>
+      <div class="mt-2" id="customerInfo" style="display:none">
+        <div class="p-2 bg-light rounded">
+          <strong id="ciName"></strong><br>
+          <span id="ciCompany"></span><br>
+          <small class="text-muted" id="ciAddress" style="white-space:pre-line"></small>
+        </div>
+      </div>
+    </div>
+
+    <div class="form-section mb-3">
+      <h5><i class="bi bi-cart-plus"></i> Add Items</h5>
+      <div class="row g-2 mb-2">
+        <div class="col-md-5">
+          <label class="form-label">Select Item</label>
+          <select class="form-select" id="itemSelect">
+            <option value="">— Pick an item —</option>
+            {% for i in items %}
+            <option value="{{ i.id }}" data-name="{{ i.item_name }}" data-desc="{{ i.description or '' }}"
+                    data-spec="{{ i.specification or '' }}" data-unit="{{ i.unit }}" data-rate="{{ i.rate_per_unit }}">
+              {{ i.item_name }} — Rs.{{ "{:,.0f}".format(i.rate_per_unit) }}/{{ i.unit }}
+            </option>
+            {% endfor %}
+          </select>
+        </div>
+        <div class="col-md-2">
+          <label class="form-label">Quantity</label>
+          <input type="number" class="form-control" id="itemQty" min="0" step="0.01" placeholder="Qty">
+        </div>
+        <div class="col-md-3">
+          <label class="form-label">&nbsp;</label>
+          <button type="button" class="btn btn-primary w-100" onclick="addItem()">
+            <i class="bi bi-plus"></i> Add
+          </button>
+        </div>
+      </div>
+      <div id="itemInfo" class="p-2 bg-light rounded mb-2" style="display:none">
+        <div id="itemInfoSpec" style="font-size:12px;white-space:pre-line;color:#666"></div>
+      </div>
+    </div>
+
+    <div class="form-section mb-3">
+      <h5><i class="bi bi-list-ol"></i> Items in Quotation</h5>
+      <div id="itemsList">
+        <div class="empty-state" id="emptyMsg">
+          <i class="bi bi-inbox"></i>
+          <p>No items added yet. Select an item above and click Add.</p>
+        </div>
+      </div>
+    </div>
+
+    <div class="form-section mb-3">
+      <h5><i class="bi bi-text-left"></i> Subject & Terms</h5>
+      <div class="mb-2">
+        <label class="form-label">Subject</label>
+        <input name="subject" class="form-control" id="subjectInput" placeholder="e.g. Sugar Elevator Chain">
+      </div>
+      <div class="mb-2">
+        <label class="form-label">Terms & Conditions</label>
+        <textarea name="terms" class="form-control" rows="4">1. Rates are Ex-works.
+2. GST 18% Extra as applicable.
+3. Payment: 20% Advance and Balance against delivery.
+4. Delivery: 10-12 weeks after receipt of order.</textarea>
+      </div>
+      <div class="mb-2">
+        <label class="form-label">Notes</label>
+        <textarea name="notes" class="form-control" rows="2" placeholder="Internal notes (optional)"></textarea>
+      </div>
+    </div>
+  </div>
+
+  <!-- RIGHT: Live Summary -->
+  <div class="col-lg-5">
+    <div class="form-section mb-3" style="position:sticky;top:70px">
+      <h5><i class="bi bi-calculator"></i> Quotation Summary</h5>
+      <div class="summary-box">
+        <div class="total-line"><span>Items:</span><strong id="sumCount">0</strong></div>
+        <div class="total-line"><span>Sub-Total:</span><strong id="sumSubtotal">Rs. 0</strong></div>
+        <div class="total-line"><span>GST (18%):</span><strong id="sumGST">Rs. 0</strong></div>
+        <div class="total-line grand-total"><span>Grand Total:</span><strong id="sumGrand">Rs. 0</strong></div>
+      </div>
+      <div class="mt-3">
+        <button type="submit" class="btn btn-primary w-100 btn-lg" id="submitBtn">
+          <i class="bi bi-check-circle"></i> Create Quotation
+        </button>
+      </div>
+      <div class="mt-2 text-center">
+        <small class="text-muted">PDF will be available after creation</small>
+      </div>
+    </div>
+  </div>
+</div>
+</form>
+{% endblock %}
+
+{% block scripts %}
+<script>
+let quotationItems = [];
+let itemCounter = 0;
+
+function fillCustomer() {
+  const sel = document.getElementById('customerSelect');
+  const opt = sel.options[sel.selectedIndex];
+  const info = document.getElementById('customerInfo');
+  if (sel.value) {
+    document.getElementById('ciName').textContent = opt.dataset.name;
+    document.getElementById('ciCompany').textContent = opt.dataset.company;
+    document.getElementById('ciAddress').textContent = opt.dataset.address;
+    info.style.display = 'block';
+  } else {
+    info.style.display = 'none';
+  }
+}
+
+document.getElementById('itemSelect').addEventListener('change', function() {
+  const opt = this.options[this.selectedIndex];
+  const info = document.getElementById('itemInfo');
+  if (this.value) {
+    document.getElementById('itemInfoSpec').innerHTML =
+      '<strong>' + opt.dataset.name + '</strong><br>' +
+      '<em>' + opt.dataset.desc + '</em><br><br>' +
+      '<b>Specification:</b><br>' + opt.dataset.spec.replace(/\n/g, '<br>') +
+      '<br><br><b>Rate:</b> Rs. ' + Number(opt.dataset.rate).toLocaleString() + ' / ' + opt.dataset.unit;
+    info.style.display = 'block';
+  } else {
+    info.style.display = 'none';
+  }
+});
+
+function addItem() {
+  const sel = document.getElementById('itemSelect');
+  const qty = parseFloat(document.getElementById('itemQty').value);
+  if (!sel.value) { alert('Please select an item.'); return; }
+  if (!qty || qty <= 0) { alert('Please enter a valid quantity.'); return; }
+  const opt = sel.options[sel.selectedIndex];
+  itemCounter++;
+  const item = {
+    id: itemCounter,
+    itemId: sel.value,
+    name: opt.dataset.name,
+    desc: opt.dataset.desc,
+    spec: opt.dataset.spec,
+    unit: opt.dataset.unit,
+    rate: parseFloat(opt.dataset.rate),
+    qty: qty
+  };
+  quotationItems.push(item);
+  renderItems();
+  // Reset
+  sel.value = '';
+  document.getElementById('itemQty').value = '';
+  document.getElementById('itemInfo').style.display = 'none';
+}
+
+function removeItem(id) {
+  quotationItems = quotationItems.filter(i => i.id !== id);
+  renderItems();
+}
+
+function renderItems() {
+  const list = document.getElementById('itemsList');
+  const empty = document.getElementById('emptyMsg');
+  if (quotationItems.length === 0) {
+    list.innerHTML = '';
+    list.appendChild(createEmptyMsg());
+    updateSummary();
+    return;
+  }
+  let html = '';
+  quotationItems.forEach((item, idx) => {
+    const amt = item.qty * item.rate;
+    const net = amt * 1.18;
+    html += `
+    <div class="quotation-item-row">
+      <div class="d-flex justify-content-between align-items-start">
+        <div>
+          <span class="item-name">${idx+1}. ${item.name}</span>
+          <input type="hidden" name="item_id[]" value="${item.itemId}">
+          <input type="hidden" name="quantity[]" value="${item.qty}">
+          <div class="item-spec">${item.spec.replace(/\n/g, '<br>')}</div>
+        </div>
+        <div class="text-end">
+          <div class="item-rate">Rs. ${item.rate.toLocaleString()} × ${item.qty} = Rs. ${amt.toLocaleString()}</div>
+          <small class="text-muted">Net (incl. GST): Rs. ${net.toLocaleString()}</small>
+          <div><button type="button" class="btn btn-sm btn-outline-danger mt-1" onclick="removeItem(${item.id})"><i class="bi bi-x"></i> Remove</button></div>
+        </div>
+      </div>
+    </div>`;
+  });
+  list.innerHTML = html;
+  updateSummary();
+}
+
+function createEmptyMsg() {
+  const d = document.createElement('div');
+  d.className = 'empty-state';
+  d.id = 'emptyMsg';
+  d.innerHTML = '<i class="bi bi-inbox"></i><p>No items added yet.</p>';
+  return d;
+}
+
+function updateSummary() {
+  let subtotal = 0;
+  quotationItems.forEach(item => { subtotal += item.qty * item.rate; });
+  const gst = subtotal * 0.18;
+  const grand = subtotal + gst;
+  document.getElementById('sumCount').textContent = quotationItems.length;
+  document.getElementById('sumSubtotal').textContent = 'Rs. ' + subtotal.toLocaleString(undefined, {minimumFractionDigits:0, maximumFractionDigits:0});
+  document.getElementById('sumGST').textContent = 'Rs. ' + gst.toLocaleString(undefined, {minimumFractionDigits:0, maximumFractionDigits:0});
+  document.getElementById('sumGrand').textContent = 'Rs. ' + grand.toLocaleString(undefined, {minimumFractionDigits:0, maximumFractionDigits:0});
+
+  // Auto-fill subject from first item
+  if (quotationItems.length > 0 && !document.getElementById('subjectInput').value) {
+    document.getElementById('subjectInput').value = quotationItems[0].name;
+  }
+}
+</script>
+{% endblock %}

@@ -1,0 +1,32 @@
+{% extends "base.html" %}
+{% block title %}Login — Aypee Quotation System{% endblock %}
+{% block content_full %}
+<div class="login-page">
+  <div class="login-card">
+    <div class="brand">
+      <div class="d-flex justify-content-center">
+        <div style="width:56px;height:56px;background:#CC0000;border-radius:12px;display:flex;align-items:center;justify-content:center;color:#fff;font-size:24px;font-weight:bold">A</div>
+      </div>
+      <h2>AYPEE INDUSTRIES</h2>
+      <p>Quotation Management System</p>
+    </div>
+    <form method="POST">
+      <div class="mb-3">
+        <label class="form-label">Username</label>
+        <input type="text" name="username" class="form-control" required autofocus placeholder="Enter username">
+      </div>
+      <div class="mb-3">
+        <label class="form-label">Password</label>
+        <input type="password" name="password" class="form-control" required placeholder="Enter password">
+      </div>
+      <button type="submit" class="btn btn-primary w-100 mb-3">
+        <i class="bi bi-box-arrow-in-right"></i> Login
+      </button>
+    </form>
+    <div class="text-center">
+      <small class="text-muted">Default: admin / admin123</small><br>
+      <a href="{{ url_for('register') }}" class="text-decoration-none" style="color:#CC0000">Create new account</a>
+    </div>
+  </div>
+</div>
+{% endblock %}

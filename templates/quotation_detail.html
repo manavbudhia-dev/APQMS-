@@ -1,0 +1,157 @@
+{% extends "base.html" %}
+{% block title %}{{ q.quotation_no }} — Aypee Quotation System{% endblock %}
+{% block page_title %}{{ q.quotation_no }}{% endblock %}
+{% block topbar_right %}
+<div class="d-flex gap-2">
+  <a href="{{ url_for('quotation_pdf', id=q.id) }}" class="btn btn-danger btn-sm"><i class="bi bi-file-earmark-pdf"></i> Download PDF</a>
+  <form method="POST" action="{{ url_for('quotation_status', id=q.id) }}" class="d-flex gap-1">
+    <select name="status" class="form-select form-select-sm" style="width:auto" onchange="this.form.submit()">
+      {% for s in ['Draft','Sent','Confirmed','Cancelled'] %}
+      <option value="{{ s }}" {% if q.status==s %}selected{% endif %}>{{ s }}</option>
+      {% endfor %}
+    </select>
+  </form>
+</div>
+{% endblock %}
+{% block content %}
+<div class="row g-3">
+  <div class="col-lg-8">
+    <!-- Quotation Preview -->
+    <div class="form-section" style="background:#fff;padding:32px;border:1px solid #ddd">
+      <!-- Letterhead -->
+      <div class="text-center mb-3">
+        <h3 style="color:#CC0000;font-weight:800">AYPEE  INDUSTRIES</h3>
+        <div class="d-flex justify-content-between" style="font-size:12px">
+          <span><u>Subject to Jalandhar Jurisdiction</u></span>
+          <span>GSTIN: 03AAHFA4106G1Z4</span>
+        </div>
+      </div>
+      <table class="table table-sm mb-2" style="font-size:11px">
+        <tr>
+          <td style="width:35%;border:1px solid #ccc">
+            <strong>Correspondence Address:</strong><br>
+            STREET NO.1, ANAND NAGAR<br>
+            NEAR KIDZ NEST SCHOOL,<br>
+            MAKSUDAN, JALANDHAR (PUNJAB), INDIA<br>
+            PIN CODE – 144008
+          </td>
+          <td style="width:35%;border:1px solid #ccc;text-align:center">
+            <strong style="color:#CC0000;font-size:16px">CHAINS</strong><br>
+            <em>MFG. OF ALL KINDS OF S.G. IRON CHAINS,<br>FABRICATED CANE CARRIER,<br>RBC & RAKE CARRIER CHAINS,</em>
+          </td>
+          <td style="width:30%;border:1px solid #ccc;text-align:right">
+            <strong>(Off.): 0181-2672260</strong><br><br>
+            <strong>(Mob): 9357255758, 9041881996</strong>
+          </td>
+        </tr>
+      </table>
+      <hr style="border-color:#333;margin:4px 0">
+      <div class="text-center" style="font-size:10px;font-weight:bold">MFG. OF ALL KINDS OF S.G. IRON CHAINS, FABRICATED CANE CARRIER, RBC & RAKE CARRIER CHAINS, SLAT & SPARE PARTS</div>
+      <hr style="border-color:#999;margin:4px 0 8px">
+      <div class="d-flex justify-content-between" style="font-size:11px">
+        <span>E-mail: <u style="color:#0000CC">aypeeinds@yahoo.com</u></span>
+        <strong>Date: {{ q.date }}</strong>
+      </div>
+
+      <div style="margin-top:16px">
+        <strong>To</strong><br>
+        <strong>{{ customer.contact_person if customer else '' }}</strong><br>
+        <strong>{{ customer.company_name if customer else '' }}</strong><br>
+        <span style="white-space:pre-line">{{ customer.address if customer else '' }}</span>
+      </div>
+
+      <div class="text-center my-3">
+        <strong style="text-decoration:underline">Sub: Quotation for {{ q.subject }}</strong>
+      </div>
+
+      <p>Dear Sir,</p>
+      <p>We are pleased to quote you the best rates for your inquiry for {{ q.subject }}. Thank you for your interest in our products.</p>
+
+      <!-- Items Table -->
+      <table class="table table-bordered mt-3" style="font-size:12px">
+        <thead style="background:#E0E0E0">
+          <tr>
+            <th style="width:5%">Sr.</th>
+            <th style="width:20%">Item</th>
+            <th style="width:25%">Description & Specification</th>
+            <th style="width:7%">Qty.</th>
+            <th style="width:7%">Unit</th>
+            <th style="width:11%">Rate (Rs.)</th>
+            <th style="width:10%">Amount (Rs.)</th>
+            <th style="width:5%">GST%</th>
+            <th style="width:10%">Net Total</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for it in items %}
+          <tr>
+            <td class="text-center"><strong>{{ loop.index }}</strong></td>
+            <td><strong>{{ it.item_name }}</strong></td>
+            <td style="white-space:pre-line;font-size:10px">{{ it.description }}<br><br><b>Specification:</b><br>{{ it.specification }}</td>
+            <td class="text-center">{{ it.quantity }}</td>
+            <td class="text-center">{{ it.unit }}</td>
+            <td class="text-end">{{ "{:,.0f}".format(it.rate) }}</td>
+            <td class="text-end">{{ "{:,.0f}".format(it.quantity * it.rate) }}</td>
+            <td class="text-center">{{ it.gst_percent|int }}%</td>
+            <td class="text-end"><strong>{{ "{:,.0f}".format(it.quantity * it.rate * (1 + it.gst_percent/100)) }}</strong></td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+
+      <!-- Summary -->
+      <div class="text-end" style="font-size:13px">
+        <div><strong>Sub-Total: Rs. {{ "{:,.0f}".format(subtotal) }}</strong></div>
+        <div><strong>GST (18%): Rs. {{ "{:,.0f}".format(gst) }}</strong></div>
+        <div style="font-size:16px;color:#CC0000;border-top:2px solid #333;padding-top:4px;margin-top:4px">
+          <strong>Grand Total: Rs. {{ "{:,.0f}".format(grand_total) }}</strong>
+        </div>
+      </div>
+
+      <!-- Terms -->
+      <div style="margin-top:16px">
+        <strong>Terms and Conditions</strong>
+        <div style="font-size:11px;white-space:pre-line;margin-left:16px">{{ q.terms }}</div>
+      </div>
+
+      <!-- Signature -->
+      <div style="margin-top:24px">
+        <strong>Thanks & Regards</strong><br><br>
+        <strong>For Aypee Industries</strong><br><br><br>
+        <strong>Raman Budhia (Partner)</strong><br>
+        <strong>+91-9357255758</strong>
+      </div>
+    </div>
+  </div>
+
+  <!-- Right sidebar -->
+  <div class="col-lg-4">
+    <div class="form-section mb-3">
+      <h5>Quotation Details</h5>
+      <table class="table table-sm">
+        <tr><td class="text-muted">Number</td><td><strong>{{ q.quotation_no }}</strong></td></tr>
+        <tr><td class="text-muted">Date</td><td>{{ q.date }}</td></tr>
+        <tr><td class="text-muted">Status</td><td><span class="badge badge-{{ q.status|lower }}">{{ q.status }}</span></td></tr>
+        <tr><td class="text-muted">Customer</td><td>{{ customer.company_name if customer else '—' }}</td></tr>
+        <tr><td class="text-muted">Items</td><td>{{ items|length }}</td></tr>
+      </table>
+    </div>
+    <div class="form-section mb-3">
+      <h5>Financial Summary</h5>
+      <div class="summary-box">
+        <div class="total-line"><span>Sub-Total</span><strong>Rs. {{ "{:,.0f}".format(subtotal) }}</strong></div>
+        <div class="total-line"><span>GST (18%)</span><strong>Rs. {{ "{:,.0f}".format(gst) }}</strong></div>
+        <div class="total-line grand-total"><span>Grand Total</span><strong>Rs. {{ "{:,.0f}".format(grand_total) }}</strong></div>
+      </div>
+    </div>
+    <div class="form-section">
+      <h5>Actions</h5>
+      <a href="{{ url_for('quotation_pdf', id=q.id) }}" class="btn btn-danger w-100 mb-2"><i class="bi bi-file-earmark-pdf"></i> Download PDF</a>
+      <a href="{{ url_for('quotations_list') }}" class="btn btn-outline-primary w-100 mb-2"><i class="bi bi-arrow-left"></i> Back to List</a>
+      <form method="POST" action="{{ url_for('quotation_delete', id=q.id) }}" onsubmit="return confirm('Delete this quotation permanently?')">
+        <button class="btn btn-outline-danger w-100"><i class="bi bi-trash"></i> Delete</button>
+      </form>
+    </div>
+  </div>
+</div>
+{% endblock %}
