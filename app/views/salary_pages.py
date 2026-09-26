@@ -1,9 +1,11 @@
 from utils.http_utils import esc
 from utils.http_utils import fmt_rupee
 from utils.http_utils import redirect
+from utils.http_utils import json_response
 from database import get_db
 from datetime import datetime
 import calendar
+import json
 
 
 def _month_days(month):
@@ -127,6 +129,170 @@ ATT_STYLE = """
 }
 """
 
+SAL_STYLE = """
+.sal-page-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; margin-bottom: 22px; flex-wrap: wrap; }
+.sal-page-head-left { display: flex; align-items: center; gap: 14px; min-width: 0; }
+.sal-head-icon {
+  width: 48px; height: 48px; border-radius: 12px; background: #FEF2F2; color: var(--primary);
+  display: flex; align-items: center; justify-content: center; font-size: 22px; flex-shrink: 0;
+}
+.sal-page-head-left h1 { font-size: 24px; font-weight: 700; color: #0F172A; margin: 0; line-height: 1.3; }
+.sal-page-head-left p { font-size: 13px; color: #64748B; margin: 2px 0 0; }
+.sal-page-head-actions { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.sal-month-form { display: flex; align-items: center; gap: 8px; }
+.sal-month-form label { font-size: 13px; color: #64748B; font-weight: 500; margin: 0; white-space: nowrap; }
+.sal-month-field { position: relative; display: flex; align-items: center; }
+.sal-month-field i { position: absolute; left: 12px; color: #64748B; font-size: 14px; pointer-events: none; z-index: 2; }
+.sal-month-field input[type=month] {
+  padding: 9px 14px 9px 34px; border-radius: 10px; border: 1px solid #E2E8F0;
+  font-weight: 600; color: #334155; background: #fff; min-width: 190px; font-size: 14px;
+}
+
+.sal-stats-row { display: grid; grid-template-columns: repeat(5, 1fr); gap: 16px; margin-bottom: 20px; }
+.sal-stats-row .stat-card:hover { box-shadow: none; }
+
+.sal-toolbar {
+  display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap;
+  padding: 18px 24px; border-bottom: 1px solid #E2E8F0;
+}
+.sal-search { flex: 1; min-width: 220px; max-width: 420px; }
+.sal-toolbar-right { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.sal-toolbar-right .form-select { min-width: 170px; }
+
+.sal-table td, .sal-table th { white-space: nowrap; }
+.sal-table .form-check-input { cursor: pointer; }
+
+.badge-present { background: #ECFDF5; color: #047857; border-color: #A7F3D0; }
+.badge-absent { background: #FEF2F2; color: #B91C1C; border-color: #FECACA; }
+.badge-notmarked { background: #F1F5F9; color: #64748B; border-color: #E2E8F0; }
+
+.row-action-btn.ra-view { border-color: #BFDBFE; color: #2563EB; }
+.row-action-btn.ra-view:hover { background: #EFF6FF; color: #1D4ED8; }
+
+.qm-btns { display: flex; gap: 4px; margin-top: 5px; }
+.qm-btn {
+  width: 24px; height: 24px; border-radius: 6px; border: 1px solid #E2E8F0; background: #fff;
+  color: #94A3B8; display: inline-flex; align-items: center; justify-content: center;
+  font-size: 12px; cursor: pointer; padding: 0; transition: 0.15s;
+}
+.qm-btn:hover { border-color: #CBD5E1; }
+.qm-btn:disabled { cursor: progress; opacity: 0.6; }
+.qm-btn.qm-present.active { background: #ECFDF5; border-color: #A7F3D0; color: #047857; }
+.qm-btn.qm-absent.active { background: #FEF2F2; border-color: #FECACA; color: #B91C1C; }
+
+.bulkadv-row {
+  display: flex; align-items: center; gap: 12px; padding: 10px 0; border-bottom: 1px solid #F1F5F9;
+}
+.bulkadv-row:last-child { border-bottom: none; }
+.bulkadv-info { flex: 1; min-width: 0; }
+.bulkadv-info .name { font-size: 13.5px; font-weight: 600; color: #0F172A; }
+.bulkadv-info .desig { font-size: 12px; color: #64748B; }
+.bulkadv-input-wrap { position: relative; width: 150px; flex-shrink: 0; }
+.bulkadv-input-wrap span {
+  position: absolute; left: 10px; top: 50%; transform: translateY(-50%); color: #64748B; font-size: 13px;
+}
+.bulkadv-input-wrap input {
+  width: 100%; padding: 7px 10px 7px 28px; border-radius: 8px; border: 1px solid #E2E8F0; font-size: 13.5px;
+}
+#bulkAdvanceList { max-height: 360px; overflow-y: auto; }
+#bulkAdvanceError { display: none; }
+
+.sal-table-footer {
+  display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap;
+  gap: 12px; padding: 16px 24px; border-top: 1px solid #E2E8F0;
+}
+.sal-count-label { font-size: 13px; color: #64748B; }
+.sal-pagination-controls { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
+.sal-pagination .page-link { color: var(--primary); }
+.sal-pagination .page-item.active .page-link { background: var(--primary); border-color: var(--primary); color: #fff; }
+.sal-pagination .page-item.disabled .page-link { color: #94A3B8; }
+#salPageSize { width: auto; }
+
+@media (max-width: 991px) {
+  .sal-stats-row { grid-template-columns: repeat(3, 1fr); }
+}
+@media (max-width: 767px) {
+  .sal-stats-row { grid-template-columns: repeat(2, 1fr); }
+}
+@media (max-width: 480px) {
+  .sal-stats-row { grid-template-columns: 1fr; }
+}
+"""
+
+
+AEMP_STYLE = """
+.aemp-breadcrumb { font-size: 13px; color: #64748B; margin-bottom: 14px; }
+.aemp-breadcrumb a { color: #64748B; text-decoration: none; }
+.aemp-breadcrumb a:hover { color: var(--primary); }
+.aemp-breadcrumb .sep { margin: 0 8px; color: #CBD5E1; font-size: 10px; }
+.aemp-breadcrumb .current { color: #0F172A; font-weight: 600; }
+
+.aemp-page-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; margin-bottom: 22px; flex-wrap: wrap; }
+.aemp-page-head-left { display: flex; align-items: center; gap: 14px; min-width: 0; }
+.aemp-head-icon {
+  width: 52px; height: 52px; border-radius: 14px; background: #FEF2F2; color: var(--primary);
+  display: flex; align-items: center; justify-content: center; font-size: 22px; flex-shrink: 0;
+}
+.aemp-page-head-left h1 { font-size: 24px; font-weight: 700; color: #0F172A; margin: 0; line-height: 1.3; }
+.aemp-page-head-left p { font-size: 13px; color: #64748B; margin: 3px 0 0; }
+.aemp-back-btn { font-weight: 500; white-space: nowrap; }
+
+.aemp-card { background: #fff; border: 1px solid #E2E8F0; border-radius: var(--radius); padding: 28px; }
+.aemp-req { color: var(--primary); }
+
+.aemp-step-head { display: flex; align-items: flex-start; gap: 14px; margin-bottom: 20px; }
+.aemp-step-num {
+  width: 30px; height: 30px; border-radius: 50%; background: var(--primary); color: #fff;
+  font-size: 13.5px; font-weight: 700; display: flex; align-items: center; justify-content: center; flex-shrink: 0;
+}
+.aemp-step-head h5 { font-size: 15.5px; font-weight: 700; color: #0F172A; margin: 0; }
+.aemp-step-head p { font-size: 12.5px; color: #64748B; margin: 2px 0 0; }
+
+.aemp-divider { border: none; border-top: 1px solid #E2E8F0; margin: 22px 0 24px; }
+
+.aemp-actions { display: flex; gap: 12px; margin-top: 28px; }
+
+.aemp-side-card {
+  background: #fff; border: 1px solid #E2E8F0; border-radius: var(--radius);
+  overflow: hidden; margin-bottom: 20px;
+}
+.aemp-side-header {
+  background: #FEF2F2; color: #0F172A; font-weight: 700; font-size: 15px;
+  padding: 16px 22px; display: flex; align-items: center; gap: 10px;
+}
+.aemp-side-header i { color: var(--primary); font-size: 16px; }
+.aemp-formula-header { background: #EFF6FF; }
+.aemp-formula-header i { color: #2563EB; }
+.aemp-side-body { padding: 18px 22px 20px; }
+
+.aemp-how-item { display: flex; gap: 14px; margin-bottom: 18px; }
+.aemp-how-item:last-child { margin-bottom: 0; }
+.aemp-how-num {
+  width: 24px; height: 24px; border-radius: 50%; background: var(--primary); color: #fff;
+  font-size: 12px; font-weight: 700; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 1px;
+}
+.aemp-how-item h6 { font-size: 13.5px; font-weight: 700; color: #0F172A; margin: 0 0 2px; }
+.aemp-how-item p { font-size: 12.5px; color: #64748B; margin: 0; line-height: 1.5; }
+
+.aemp-formula-row { display: flex; align-items: center; gap: 10px; padding: 7px 0; font-size: 13.5px; color: #334155; }
+.aemp-formula-row span:first-child { flex: 0 0 130px; color: #475569; }
+.aemp-formula-row .aemp-eq { flex: 0 0 16px; color: #94A3B8; text-align: center; }
+.aemp-formula-divider { border: none; border-top: 2px solid var(--primary); margin: 8px 0; }
+.aemp-formula-net span:first-child, .aemp-formula-net span:last-child, .aemp-formula-net .aemp-eq { color: var(--primary); font-weight: 700; }
+
+.aemp-tip {
+  display: flex; gap: 12px; align-items: flex-start; background: #ECFDF5; border: 1px solid #A7F3D0;
+  border-radius: var(--radius); padding: 16px 18px; font-size: 13px; color: #065F46;
+}
+.aemp-tip i { color: #10B981; font-size: 16px; margin-top: 1px; flex-shrink: 0; }
+
+@media (max-width: 767px) {
+  .aemp-formula-row span:first-child { flex: 0 0 110px; }
+  .aemp-page-head { flex-direction: column; }
+}
+"""
+
+
 class SalaryPagesMixin:
     def handle_employee_add(self, form):
         db = get_db()
@@ -186,6 +352,70 @@ class SalaryPagesMixin:
         return self.send(*redirect(f'/salary/{eid}?month={month}'))
 
 
+    def handle_attendance_quick_mark(self, eid, form):
+        """AJAX endpoint used by the Salary list page's quick Present/
+        Absent buttons: marks *today's* attendance for one employee
+        without navigating to the full attendance page. Preserves any
+        checkout time/overtime already logged for the day."""
+        db = get_db()
+        emp = db.execute("SELECT * FROM employees WHERE id=?", (eid,)).fetchone()
+        if not emp:
+            db.close()
+            return self.send(*json_response({'error': 'Employee not found.'}, 404))
+        date_str = (form.get('date', '') or datetime.now().strftime('%Y-%m-%d')).strip()
+        month = date_str[:7]
+        active = _employee_active_range(emp, month)
+        try:
+            day = int(date_str[8:10])
+        except (ValueError, IndexError):
+            db.close()
+            return self.send(*json_response({'error': 'Invalid date.'}, 400))
+        if not active or not (active[0] <= day <= active[1]):
+            db.close()
+            return self.send(*json_response(
+                {'error': 'This employee was not active on that date.'}, 400))
+        present = 1 if str(form.get('present', '')) in ('1', 'true', 'True', 'on') else 0
+        existing = db.execute(
+            "SELECT check_out, overtime_hours FROM attendance WHERE employee_id=? AND date=?",
+            (eid, date_str)).fetchone()
+        checkout = existing['check_out'] if existing else ''
+        overtime = existing['overtime_hours'] if existing else 0
+        db.execute(
+            "INSERT OR REPLACE INTO attendance (employee_id, date, is_present, check_in, check_out, overtime_hours) "
+            "VALUES (?,?,?,?,?,?)",
+            (eid, date_str, present, '', checkout or '', overtime or 0))
+        db.commit()
+        db.close()
+        return self.send(*json_response({'ok': True, 'status': 'present' if present else 'absent'}))
+
+
+    def handle_advance_bulk(self, form):
+        """AJAX endpoint for the Salary list page's 'Bulk Advance Entry'
+        modal: saves every employee's advance amount for the month in
+        one request instead of opening each employee's edit page."""
+        advances = form.get('advances') or {}
+        if isinstance(advances, str):
+            try:
+                advances = json.loads(advances)
+            except Exception:
+                advances = {}
+        if not isinstance(advances, dict):
+            return self.send(*json_response({'error': 'Invalid data.'}, 400))
+        db = get_db()
+        updated = 0
+        for eid, amt in advances.items():
+            try:
+                eid_int = int(eid)
+                amt_val = float(amt or 0)
+            except (TypeError, ValueError):
+                continue
+            db.execute("UPDATE employees SET advance=? WHERE id=?", (amt_val, eid_int))
+            updated += 1
+        db.commit()
+        db.close()
+        return self.send(*json_response({'ok': True, 'updated': updated}))
+
+
     def handle_attendance_clear(self, eid, form):
         """Wipe all attendance rows for one employee/month so it can be
         re-entered from scratch (e.g. after entering a month wrong, or
@@ -205,13 +435,27 @@ class SalaryPagesMixin:
         db = get_db()
         employees = db.execute("SELECT * FROM employees ORDER BY name").fetchall()
         current_month = month or datetime.now().strftime('%Y-%m')
+        days_in_month = _month_days(current_month)
+
+        now = datetime.now()
+        today_str = now.strftime('%Y-%m-%d')
+        today_in_month = today_str.startswith(current_month)
+        today_day = now.day
+
         rows = ''
+        idx = 0
+        total_employees = 0
+        present_today = 0
+        absent_today = 0
+        total_overtime = 0.0
+        total_net = 0.0
+        bulk_adv_rows = ''
+
         for e in employees:
             active = _employee_active_range(e, current_month)
             if not active:
                 continue  # not employed during this month — leave off the list
             first_day, last_day = active
-            days_in_month = _month_days(current_month)
             active_days = last_day - first_day + 1
             start_date = f"{current_month}-{first_day:02d}"
             end_date = f"{current_month}-{last_day:02d}"
@@ -250,147 +494,577 @@ class SalaryPagesMixin:
                         pass
             absent_ded = per_day * absent_days if total_days > 0 else 0
             net = basic_for_month + ot_pay - absent_ded - advance - partial_ded
+
+            # ── Today's attendance status, used for the Status column
+            # and the Present/Absent-this-month stat cards. Only
+            # resolvable when the selected month is the current month
+            # and today falls inside this employee's active range.
+            status_key, status_label = 'not_marked', 'Not Marked'
+            if today_in_month and first_day <= today_day <= last_day:
+                att_today = db.execute(
+                    "SELECT is_present FROM attendance WHERE employee_id=? AND date=?",
+                    (e['id'], today_str)).fetchone()
+                if att_today:
+                    status_key = 'present' if att_today['is_present'] else 'absent'
+                    status_label = 'Present' if att_today['is_present'] else 'Absent'
+
+            idx += 1
+            total_employees += 1
+            total_overtime += ot_hours
+            total_net += net
+            if status_key == 'present':
+                present_today += 1
+            elif status_key == 'absent':
+                absent_today += 1
+
             period_note = ''
             if active_days < days_in_month:
                 period_note = f' <small class="text-muted d-block">({active_days} days this month)</small>'
-            rows += (f'<tr><td><strong>{esc(e["name"])}</strong>{period_note}</td>'
+            basic_html = f'Rs. {fmt_rupee(basic_for_month)}' if basic_for_month else '-'
+            net_html = (f'<strong style="color:#DC2626">Rs. {fmt_rupee(net)}</strong>'
+                        if basic_for_month else '-')
+            name_lc = esc((e["name"] or '').lower())
+            desig_lc = esc((e["designation"] or '').lower())
+
+            # Quick-mark Present/Absent only makes sense for *today*, so
+            # only offer it when the list is viewing the current month
+            # and today falls inside this employee's active range.
+            can_quick_mark = today_in_month and first_day <= today_day <= last_day
+            qm_html = ''
+            if can_quick_mark:
+                qm_html = (
+                    f'<div class="qm-btns" data-qm-group="{e["id"]}">'
+                    f'<button type="button" class="qm-btn qm-present{" active" if status_key == "present" else ""}" '
+                    f'data-eid="{e["id"]}" data-present="1" title="Mark present today"><i class="bi bi-check-lg"></i></button>'
+                    f'<button type="button" class="qm-btn qm-absent{" active" if status_key == "absent" else ""}" '
+                    f'data-eid="{e["id"]}" data-present="0" title="Mark absent today"><i class="bi bi-x-lg"></i></button>'
+                    f'</div>')
+
+            rows += (f'<tr data-name="{name_lc}" data-designation="{desig_lc}" data-status="{status_key}">'
+                     f'<td><input type="checkbox" class="form-check-input sal-row-check" value="{e["id"]}" aria-label="Select {esc(e["name"])}"></td>'
+                     f'<td class="text-muted">{idx}</td>'
+                     f'<td><strong>{esc(e["name"])}</strong>{period_note}</td>'
                      f'<td>{esc(e["designation"] or "-")}</td>'
-                     f'<td>Rs. {fmt_rupee(basic_for_month)}</td>'
+                     f'<td>{basic_html}</td>'
                      f'<td class="text-center">{present_days}/{total_days}</td>'
                      f'<td class="text-center">{absent_days}</td>'
                      f'<td class="text-center">{ot_hours:.1f} hrs</td>'
-                     f'<td><strong style="color:#DC2626">Rs. {fmt_rupee(net)}</strong></td>'
+                     f'<td>{net_html}</td>'
+                     f'<td><span class="badge badge-{status_key.replace("_", "")}">{status_label}</span>{qm_html}</td>'
                      f'<td class="text-end">'
-                     f'<a href="/salary/{e["id"]}?month={current_month}" class="btn btn-sm btn-outline-primary me-1" title="View"><i class="bi bi-eye"></i></a>'
-                     f'<a href="/salary/{e["id"]}/attendance?month={current_month}" class="btn btn-sm btn-outline-success me-1" title="Attendance"><i class="bi bi-calendar-check"></i></a>'
+                     f'<a href="/salary/{e["id"]}?month={current_month}" class="row-action-btn ra-view me-1" title="View"><i class="bi bi-eye"></i></a>'
+                     f'<a href="/salary/{e["id"]}/edit?month={current_month}" class="row-action-btn ra-edit me-1" title="Edit"><i class="bi bi-pencil"></i></a>'
                      f'<form method="POST" action="/salary/{e["id"]}/delete" class="d-inline" onsubmit="return confirm(\'Delete this employee?\')">'
-                     f'<button class="btn btn-sm btn-outline-danger"><i class="bi bi-trash"></i></button></form>'
+                     f'<button type="submit" class="row-action-btn ra-delete" title="Delete"><i class="bi bi-trash"></i></button></form>'
                      f'</td></tr>')
-        if not rows:
-            rows = ('<tr><td colspan="8" class="text-center text-muted py-4">'
-                    'No employees yet. <a href="/salary/new">Add your first employee</a></td></tr>')
+
+            bulk_adv_rows += (
+                f'<div class="bulkadv-row">'
+                f'<div class="bulkadv-info"><div class="name">{esc(e["name"])}</div>'
+                f'<div class="desig">{esc(e["designation"] or "-")}</div></div>'
+                f'<div class="bulkadv-input-wrap"><span>Rs.</span>'
+                f'<input type="number" min="0" step="0.01" class="bulkadv-input" '
+                f'data-eid="{e["id"]}" value="{advance:g}"></div>'
+                f'</div>')
         db.close()
+
+        if not rows:
+            rows = ('<tr><td colspan="11" class="text-center text-muted py-4">'
+                    'No employees yet. <a href="/salary/new">Add your first employee</a></td></tr>')
+
+        month_label = datetime.strptime(current_month, '%Y-%m').strftime('%B, %Y')
+
         content = f'''
-<div class="d-flex justify-content-between align-items-center mb-4 flex-wrap gap-2">
-  <h5 class="mb-0"><i class="bi bi-cash-stack"></i> Salary Management <small class="text-muted" style="font-size:14px">({current_month})</small></h5>
-  <div class="d-flex gap-2 align-items-center">
-    <form method="GET" action="/salary" class="d-flex gap-1 align-items-center">
-      <label class="text-muted small mb-0 me-1">Month</label>
-      <input type="month" name="month" value="{current_month}" class="form-control form-control-sm" onchange="this.form.submit()">
+<style>{SAL_STYLE}</style>
+<div class="sal-page-head">
+  <div class="sal-page-head-left">
+    <div class="sal-head-icon"><i class="bi bi-wallet2"></i></div>
+    <div>
+      <h1>Salary Management</h1>
+      <p>Manage employee salaries, attendance and payments</p>
+    </div>
+  </div>
+  <div class="sal-page-head-actions">
+    <form method="GET" action="/salary" class="sal-month-form">
+      <label>Month</label>
+      <div class="sal-month-field">
+        <i class="bi bi-calendar3"></i>
+        <input type="month" name="month" value="{current_month}" onchange="this.form.submit()">
+      </div>
     </form>
-    <a href="/salary/new?month={current_month}" class="btn btn-primary btn-sm"><i class="bi bi-plus-circle"></i> Add Employee</a>
+    <a href="/salary/new?month={current_month}" class="btn btn-primary"><i class="bi bi-plus-lg"></i> Add Employee</a>
   </div>
 </div>
+
+<div class="sal-stats-row">
+  <div class="stat-card">
+    <div class="d-flex align-items-center gap-3">
+      <div class="stat-icon" style="background:#EFF6FF;color:#3B82F6"><i class="bi bi-people-fill"></i></div>
+      <div><div class="stat-value">{total_employees}</div><div class="stat-label">Total Employees</div></div>
+    </div>
+  </div>
+  <div class="stat-card">
+    <div class="d-flex align-items-center gap-3">
+      <div class="stat-icon" style="background:#ECFDF5;color:#10B981"><i class="bi bi-person-check-fill"></i></div>
+      <div><div class="stat-value">{present_today}</div><div class="stat-label">Present This Month</div></div>
+    </div>
+  </div>
+  <div class="stat-card">
+    <div class="d-flex align-items-center gap-3">
+      <div class="stat-icon" style="background:#FEF2F2;color:#DC2626"><i class="bi bi-person-dash-fill"></i></div>
+      <div><div class="stat-value">{absent_today}</div><div class="stat-label">Absent This Month</div></div>
+    </div>
+  </div>
+  <div class="stat-card">
+    <div class="d-flex align-items-center gap-3">
+      <div class="stat-icon" style="background:#FFFBEB;color:#F59E0B"><i class="bi bi-clock-history"></i></div>
+      <div><div class="stat-value">{total_overtime:.1f} hrs</div><div class="stat-label">Total Overtime</div></div>
+    </div>
+  </div>
+  <div class="stat-card">
+    <div class="d-flex align-items-center gap-3">
+      <div class="stat-icon" style="background:#F5F3FF;color:#8B5CF6"><i class="bi bi-currency-rupee"></i></div>
+      <div><div class="stat-value">Rs. {fmt_rupee(total_net)}</div><div class="stat-label">Total Net Salary</div></div>
+    </div>
+  </div>
+</div>
+
 <div class="table-card">
+  <div class="sal-toolbar">
+    <div class="sal-search input-icon">
+      <i class="bi bi-search"></i>
+      <input type="text" id="salSearch" class="form-control" placeholder="Search employee by name, designation...">
+    </div>
+    <div class="sal-toolbar-right">
+      <div class="input-icon">
+        <i class="bi bi-funnel"></i>
+        <select id="salFilter" class="form-select">
+          <option value="all">All Employees</option>
+          <option value="present">Present</option>
+          <option value="absent">Absent</option>
+          <option value="not_marked">Not Marked</option>
+        </select>
+      </div>
+      <button type="button" class="btn btn-outline-primary" data-bs-toggle="modal" data-bs-target="#bulkAdvanceModal"><i class="bi bi-cash-stack"></i> Bulk Advance</button>
+      <button type="button" class="btn btn-outline-primary" id="salExportBtn"><i class="bi bi-download"></i> Export</button>
+    </div>
+  </div>
   <div class="table-responsive-wrapper">
-    <table class="table table-hover mb-0">
+    <table class="table table-hover mb-0 sal-table" id="salTable">
       <thead><tr>
-        <th style="padding:14px 16px">Name</th>
-        <th style="padding:14px 16px">Designation</th>
-        <th style="padding:14px 16px">Basic Salary</th>
-        <th class="text-center" style="padding:14px 16px">Present</th>
-        <th class="text-center" style="padding:14px 16px">Absent</th>
-        <th class="text-center" style="padding:14px 16px">Overtime</th>
-        <th style="padding:14px 16px">Net Salary</th>
-        <th class="text-end" style="padding:14px 16px">Actions</th>
+        <th style="width:36px"><input type="checkbox" id="salSelectAll" aria-label="Select all employees"></th>
+        <th>#</th>
+        <th>Name</th>
+        <th>Designation</th>
+        <th>Basic Salary</th>
+        <th class="text-center">Present</th>
+        <th class="text-center">Absent</th>
+        <th class="text-center">Overtime</th>
+        <th>Net Salary</th>
+        <th>Status</th>
+        <th class="text-end">Actions</th>
       </tr></thead>
-      <tbody>{rows}</tbody>
+      <tbody id="salTableBody">{rows}</tbody>
     </table>
   </div>
-</div>'''
-        return self._layout('Salary', 'Salary Management', content, 'salary')
+  <div class="sal-table-footer">
+    <div class="sal-count-label" id="salCountLabel"></div>
+    <div class="sal-pagination-controls">
+      <nav aria-label="Employees pagination"><ul class="pagination pagination-sm sal-pagination mb-0" id="salPagination"></ul></nav>
+      <select id="salPageSize" class="form-select form-select-sm">
+        <option value="10">10 / page</option>
+        <option value="25">25 / page</option>
+        <option value="50">50 / page</option>
+        <option value="99999">All</option>
+      </select>
+    </div>
+  </div>
+</div>
+
+<div class="modal fade" id="bulkAdvanceModal" tabindex="-1" aria-hidden="true">
+  <div class="modal-dialog modal-dialog-centered">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title"><i class="bi bi-cash-stack me-2"></i>Bulk Advance Entry \u2014 {month_label}</h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+      </div>
+      <div class="modal-body">
+        <div class="alert alert-danger py-2" id="bulkAdvanceError"></div>
+        <p class="text-muted" style="font-size:13px;">Enter this month's advance for each employee, then save them all at once.</p>
+        <div id="bulkAdvanceList">{bulk_adv_rows or '<p class="text-muted mb-0">No employees to show for this month.</p>'}</div>
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+        <button type="button" class="btn btn-primary" id="bulkAdvanceSaveBtn"><i class="bi bi-check-lg"></i> Save All</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+(function() {{
+  var tbody = document.getElementById('salTableBody');
+  var allRows = Array.prototype.slice.call(tbody.querySelectorAll('tr[data-name]'));
+  var searchInput = document.getElementById('salSearch');
+  var filterSelect = document.getElementById('salFilter');
+  var pageSizeSelect = document.getElementById('salPageSize');
+  var paginationEl = document.getElementById('salPagination');
+  var countLabel = document.getElementById('salCountLabel');
+  var selectAll = document.getElementById('salSelectAll');
+  var exportBtn = document.getElementById('salExportBtn');
+  var currentPage = 1;
+
+  function matches(row) {{
+    var q = searchInput.value.trim().toLowerCase();
+    var status = filterSelect.value;
+    if (status !== 'all' && row.getAttribute('data-status') !== status) return false;
+    if (!q) return true;
+    var name = row.getAttribute('data-name') || '';
+    var desig = row.getAttribute('data-designation') || '';
+    return name.indexOf(q) !== -1 || desig.indexOf(q) !== -1;
+  }}
+
+  function render() {{
+    if (!allRows.length) {{
+      countLabel.textContent = '';
+      paginationEl.innerHTML = '';
+      return;
+    }}
+    var filtered = allRows.filter(matches);
+    var pageSize = parseInt(pageSizeSelect.value, 10) || 10;
+    var totalPages = Math.max(1, Math.ceil(filtered.length / pageSize));
+    if (currentPage > totalPages) currentPage = totalPages;
+    if (currentPage < 1) currentPage = 1;
+    var start = (currentPage - 1) * pageSize;
+    var end = start + pageSize;
+
+    allRows.forEach(function(row) {{ row.classList.add('d-none'); }});
+    filtered.slice(start, end).forEach(function(row) {{ row.classList.remove('d-none'); }});
+
+    var shown = Math.min(end, filtered.length);
+    if (filtered.length === 0) {{
+      countLabel.textContent = 'No employees match your search';
+    }} else {{
+      countLabel.textContent = 'Showing ' + (start + 1) + '\\u2013' + shown + ' of ' + filtered.length + ' employees';
+    }}
+
+    paginationEl.innerHTML = '';
+    var addPage = function(label, page, disabled, active) {{
+      var li = document.createElement('li');
+      li.className = 'page-item' + (disabled ? ' disabled' : '') + (active ? ' active' : '');
+      var a = document.createElement('a');
+      a.className = 'page-link';
+      a.href = '#';
+      a.textContent = label;
+      if (!disabled && !active) {{
+        a.addEventListener('click', function(ev) {{ ev.preventDefault(); currentPage = page; render(); }});
+      }}
+      li.appendChild(a);
+      paginationEl.appendChild(li);
+    }};
+    addPage('\\u2039', currentPage - 1, currentPage <= 1, false);
+    for (var p = 1; p <= totalPages; p++) {{
+      addPage(String(p), p, false, p === currentPage);
+    }}
+    addPage('\\u203a', currentPage + 1, currentPage >= totalPages, false);
+  }}
+
+  searchInput.addEventListener('input', function() {{ currentPage = 1; render(); }});
+  filterSelect.addEventListener('change', function() {{ currentPage = 1; render(); }});
+  pageSizeSelect.addEventListener('change', function() {{ currentPage = 1; render(); }});
+
+  if (selectAll) {{
+    selectAll.addEventListener('change', function() {{
+      allRows.forEach(function(row) {{
+        if (!row.classList.contains('d-none')) {{
+          var cb = row.querySelector('.sal-row-check');
+          if (cb) cb.checked = selectAll.checked;
+        }}
+      }});
+    }});
+  }}
+
+  if (exportBtn) {{
+    exportBtn.addEventListener('click', function() {{
+      var visible = allRows.filter(matches);
+      var header = ['#', 'Name', 'Designation', 'Basic Salary', 'Present', 'Absent', 'Overtime', 'Net Salary', 'Status'];
+      var lines = [header.join(',')];
+      visible.forEach(function(row) {{
+        var cells = row.querySelectorAll('td');
+        var vals = [
+          cells[1].textContent.trim(),
+          cells[2].textContent.trim().replace(/,/g, ' '),
+          cells[3].textContent.trim().replace(/,/g, ' '),
+          cells[4].textContent.trim().replace(/,/g, ' '),
+          cells[5].textContent.trim(),
+          cells[6].textContent.trim(),
+          cells[7].textContent.trim().replace(/,/g, ' '),
+          cells[8].textContent.trim().replace(/,/g, ' '),
+          cells[9].textContent.trim()
+        ];
+        lines.push(vals.map(function(v) {{ return '"' + v.replace(/"/g, '""') + '"'; }}).join(','));
+      }});
+      var blob = new Blob([lines.join('\\n')], {{ type: 'text/csv' }});
+      var link = document.createElement('a');
+      link.href = URL.createObjectURL(blob);
+      link.download = 'salary-{current_month}.csv';
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+    }});
+  }}
+
+  render();
+
+  // ── Quick attendance marking (today) directly from the list ──
+  tbody.addEventListener('click', function(ev) {{
+    var btn = ev.target.closest('.qm-btn');
+    if (!btn) return;
+    var group = btn.closest('.qm-btns');
+    var eid = btn.getAttribute('data-eid');
+    var present = btn.getAttribute('data-present');
+    group.querySelectorAll('.qm-btn').forEach(function(b) {{ b.disabled = true; }});
+    fetch('/salary/' + eid + '/attendance/mark', {{
+      method: 'POST',
+      headers: {{'Content-Type': 'application/json'}},
+      body: JSON.stringify({{present: present}})
+    }}).then(function(r) {{ return r.json().then(function(d) {{ return {{ok: r.ok, data: d}}; }}); }})
+      .then(function(res) {{
+        if (!res.ok) throw new Error(res.data.error || 'Could not save attendance.');
+        window.location.reload();
+      }})
+      .catch(function(e) {{
+        group.querySelectorAll('.qm-btn').forEach(function(b) {{ b.disabled = false; }});
+        alert((e && e.message) || 'Could not save attendance. Please try again.');
+      }});
+  }});
+
+  // ── Bulk advance entry modal ──
+  var bulkSaveBtn = document.getElementById('bulkAdvanceSaveBtn');
+  if (bulkSaveBtn) {{
+    bulkSaveBtn.addEventListener('click', function() {{
+      var errEl = document.getElementById('bulkAdvanceError');
+      errEl.style.display = 'none';
+      var advances = {{}};
+      document.querySelectorAll('.bulkadv-input').forEach(function(inp) {{
+        advances[inp.getAttribute('data-eid')] = parseFloat(inp.value) || 0;
+      }});
+      bulkSaveBtn.disabled = true;
+      fetch('/salary/advance/bulk', {{
+        method: 'POST',
+        headers: {{'Content-Type': 'application/json'}},
+        body: JSON.stringify({{advances: advances, month: '{current_month}'}})
+      }}).then(function(r) {{ return r.json().then(function(d) {{ return {{ok: r.ok, data: d}}; }}); }})
+        .then(function(res) {{
+          if (!res.ok) throw new Error(res.data.error || 'Could not save advances.');
+          window.location.reload();
+        }})
+        .catch(function(e) {{
+          bulkSaveBtn.disabled = false;
+          errEl.textContent = (e && e.message) || 'Could not save advances. Please try again.';
+          errEl.style.display = 'block';
+        }});
+    }});
+  }}
+}})();
+</script>'''
+        return self._layout('Salary', f'Salary Management ({month_label})', content, 'salary')
 
 
     # ── PAGE: NEW EMPLOYEE ────────────────────────────────────
     def pg_salary_new(self, month=None):
         back_href = f'/salary?month={month}' if month else '/salary'
+        today = datetime.now().strftime('%Y-%m-%d')
+
         content = f'''
+<style>{AEMP_STYLE}</style>
+<div class="aemp-breadcrumb">
+  <a href="/dashboard"><i class="bi bi-house"></i> Home</a>
+  <i class="bi bi-chevron-right sep"></i>
+  <a href="{back_href}">Salary</a>
+  <i class="bi bi-chevron-right sep"></i>
+  <span class="current">Add Employee</span>
+</div>
+
+<div class="aemp-page-head">
+  <div class="aemp-page-head-left">
+    <div class="aemp-head-icon"><i class="bi bi-person-plus-fill"></i></div>
+    <div>
+      <h1>Add Employee</h1>
+      <p>Add a new employee to manage salary and attendance.</p>
+    </div>
+  </div>
+  <a href="{back_href}" class="btn btn-outline-secondary aemp-back-btn"><i class="bi bi-arrow-left"></i> Back to Salary</a>
+</div>
+
 <div class="row g-4">
   <div class="col-lg-7">
-    <div class="form-section">
-      <div class="d-flex justify-content-between align-items-center mb-4">
-        <h5 class="mb-0"><i class="bi bi-person-plus"></i> Add Employee</h5>
-        <a href="{back_href}" class="btn btn-outline-primary btn-sm"><i class="bi bi-arrow-left"></i> Back</a>
-      </div>
-      <form method="POST" action="/salary/new">
+    <div class="aemp-card">
+      <form method="POST" action="/salary/new" id="aempForm">
         <input type="hidden" name="month" value="{month or ''}">
-        <div class="mb-3">
-          <label class="form-label">Employee Name *</label>
-          <input name="name" class="form-control" required placeholder="Enter full name">
+
+        <div class="aemp-step-head">
+          <div class="aemp-step-num">1</div>
+          <div>
+            <h5>Basic Information</h5>
+            <p>Enter employee's basic details</p>
+          </div>
         </div>
-        <div class="row g-3 mb-3">
+        <div class="mb-3">
+          <label class="form-label">Employee Name <span class="aemp-req">*</span></label>
+          <div class="input-icon">
+            <i class="bi bi-person"></i>
+            <input name="name" class="form-control" required placeholder="Enter full name">
+          </div>
+        </div>
+        <div class="row g-3 mb-1">
           <div class="col-md-6">
             <label class="form-label">Designation</label>
-            <input name="designation" class="form-control" placeholder="e.g. Supervisor, Worker">
+            <div class="input-icon">
+              <i class="bi bi-briefcase"></i>
+              <input name="designation" class="form-control" placeholder="e.g. Supervisor, Worker">
+            </div>
           </div>
           <div class="col-md-6">
-            <label class="form-label">Phone</label>
-            <input name="phone" class="form-control" placeholder="Contact number">
+            <label class="form-label">Phone Number</label>
+            <div class="input-icon">
+              <i class="bi bi-telephone"></i>
+              <input name="phone" class="form-control" placeholder="Enter contact number">
+            </div>
           </div>
         </div>
-        <hr>
-        <h6 class="mb-3" style="color:#64748B"><i class="bi bi-cash"></i> Salary Details</h6>
+
+        <hr class="aemp-divider">
+
+        <div class="aemp-step-head">
+          <div class="aemp-step-num">2</div>
+          <div>
+            <h5>Salary Details</h5>
+            <p>Set salary structure and working hours</p>
+          </div>
+        </div>
         <div class="row g-3 mb-3">
           <div class="col-md-4">
-            <label class="form-label">Basic Salary (Rs.) *</label>
-            <input name="basic_salary" type="number" class="form-control" step="0.01" required placeholder="e.g. 15000">
+            <label class="form-label">Basic Salary (Rs.) <span class="aemp-req">*</span></label>
+            <div class="input-icon">
+              <i class="bi bi-currency-rupee"></i>
+              <input name="basic_salary" type="number" class="form-control" step="0.01" required placeholder="e.g. 15000">
+            </div>
           </div>
           <div class="col-md-4">
             <label class="form-label">Overtime Rate (x)</label>
-            <input name="overtime_rate" type="number" class="form-control" value="1.5" step="0.1" min="1" placeholder="1.5">
-            <small class="text-muted">Multiplier for OT hours</small>
+            <div class="input-icon">
+              <i class="bi bi-clock"></i>
+              <input name="overtime_rate" type="number" class="form-control" value="1.5" step="0.1" min="1" placeholder="1.5">
+            </div>
+            <small class="text-muted">Multiplier for OT hours (e.g. 1.5x)</small>
           </div>
           <div class="col-md-4">
-            <label class="form-label">Working Hours/Day</label>
-            <input name="working_hours_per_day" type="number" class="form-control" value="8" step="0.5" min="1" placeholder="8">
-            <small class="text-muted">Standard hours per day</small>
+            <label class="form-label">Working Hours / Day</label>
+            <div class="input-icon">
+              <i class="bi bi-clock"></i>
+              <input name="working_hours_per_day" type="number" class="form-control" value="8" step="0.5" min="1" placeholder="8">
+            </div>
+            <small class="text-muted">Standard working hours per day</small>
           </div>
         </div>
-        <div class="row g-3 mb-3">
+        <div class="row g-3 mb-1">
           <div class="col-md-4">
             <label class="form-label">Advance (Rs.)</label>
-            <input name="advance" type="number" class="form-control" step="0.01" value="0" min="0" placeholder="0">
-            <small class="text-muted">Monthly advance deduction</small>
+            <div class="input-icon">
+              <i class="bi bi-currency-rupee"></i>
+              <input name="advance" type="number" class="form-control" step="0.01" value="0" min="0" placeholder="0">
+            </div>
+            <small class="text-muted">Monthly advance deduction (if any)</small>
           </div>
         </div>
-        <hr>
-        <h6 class="mb-3" style="color:#64748B"><i class="bi bi-calendar-range"></i> Employment Period</h6>
-        <div class="row g-3 mb-3">
+
+        <hr class="aemp-divider">
+
+        <div class="aemp-step-head">
+          <div class="aemp-step-num">3</div>
+          <div>
+            <h5>Employment Period</h5>
+            <p>Set joining and leaving date</p>
+          </div>
+        </div>
+        <div class="row g-3 mb-1">
           <div class="col-md-6">
-            <label class="form-label">Date of Joining</label>
-            <input name="joining_date" type="date" class="form-control" value="''' + datetime.now().strftime('%Y-%m-%d') + '''">
-            <small class="text-muted">Salary/attendance only counted from this date onward</small>
+            <label class="form-label">Date of Joining <span class="aemp-req">*</span></label>
+            <div class="input-icon">
+              <i class="bi bi-calendar3"></i>
+              <input name="joining_date" type="date" class="form-control" required value="{today}">
+            </div>
+            <small class="text-muted">Salary/attendance counted from this date onward</small>
           </div>
           <div class="col-md-6">
             <label class="form-label">Date of Leaving</label>
-            <input name="leaving_date" type="date" class="form-control">
+            <div class="input-icon">
+              <i class="bi bi-calendar3"></i>
+              <input name="leaving_date" type="date" class="form-control">
+            </div>
             <small class="text-muted">Leave blank if still working</small>
           </div>
         </div>
-        <div class="mt-4">
-          <button type="submit" class="btn btn-primary btn-lg"><i class="bi bi-check-circle"></i> Save Employee</button>
+
+        <div class="aemp-actions">
+          <button type="submit" class="btn btn-primary" title="Save (Ctrl+S)"><i class="bi bi-check-circle"></i> Save Employee</button>
+          <a href="{back_href}" class="btn btn-outline-secondary">Cancel</a>
         </div>
       </form>
     </div>
   </div>
+
   <div class="col-lg-5">
-    <div class="form-section">
-      <h5><i class="bi bi-info-circle"></i> How it works</h5>
-      <div style="font-size:13px;color:#64748B;line-height:1.8">
-        <p><b>Basic Salary:</b> Monthly fixed salary for 30 days.</p>
-        <p><b>Overtime Rate:</b> If set to 1.5x, an employee earning Rs. 15,000 gets Rs. 865/hr for overtime.</p>
-        <p><b>Working Hours:</b> Hours beyond this in a day count as overtime.</p>
-        <hr>
-        <p><b>Salary Formula (30 days):</b></p>
-        <p>Per Day = Basic / 30</p>
-        <p>Hourly Rate = Per Day / Working Hours</p>
-        <p>OT Pay = OT Hours x Hourly Rate x OT Rate</p>
-        <p>Absent Deduction = Per Day x Absent Days</p>
-        <p><b>Net = Basic + OT Pay - Absent Deduction</b></p>
+    <div class="aemp-side-card">
+      <div class="aemp-side-header"><i class="bi bi-lightbulb-fill"></i> How it works</div>
+      <div class="aemp-side-body">
+        <div class="aemp-how-item">
+          <div class="aemp-how-num">1</div>
+          <div><h6>Basic Salary</h6><p>Monthly fixed salary for 30 days.</p></div>
+        </div>
+        <div class="aemp-how-item">
+          <div class="aemp-how-num">2</div>
+          <div><h6>Overtime Rate</h6><p>If set to 1.5x, an employee earning Rs. 15,000 gets Rs. 865/hr for overtime.</p></div>
+        </div>
+        <div class="aemp-how-item">
+          <div class="aemp-how-num">3</div>
+          <div><h6>Working Hours</h6><p>Hours beyond this in a day count as overtime.</p></div>
+        </div>
+        <div class="aemp-how-item">
+          <div class="aemp-how-num">4</div>
+          <div><h6>Advance</h6><p>Monthly advance will be deducted from the salary.</p></div>
+        </div>
       </div>
     </div>
+
+    <div class="aemp-side-card aemp-formula-card">
+      <div class="aemp-side-header aemp-formula-header"><i class="bi bi-calculator-fill"></i> Salary Formula (30 days)</div>
+      <div class="aemp-side-body">
+        <div class="aemp-formula-row"><span>Per Day</span><span class="aemp-eq">=</span><span>Basic / 30</span></div>
+        <div class="aemp-formula-row"><span>Hourly Rate</span><span class="aemp-eq">=</span><span>Per Day / Working Hours</span></div>
+        <div class="aemp-formula-row"><span>OT Pay</span><span class="aemp-eq">=</span><span>OT Hours &times; Hourly Rate &times; OT Rate</span></div>
+        <div class="aemp-formula-row"><span>Absent Deduction</span><span class="aemp-eq">=</span><span>Per Day &times; Absent Days</span></div>
+        <hr class="aemp-formula-divider">
+        <div class="aemp-formula-row aemp-formula-net"><span>Net Salary</span><span class="aemp-eq">=</span><span>Basic + OT Pay - Absent Deduction</span></div>
+      </div>
+    </div>
+
+    <div class="aemp-tip">
+      <i class="bi bi-info-circle-fill"></i>
+      <div><b>Tip:</b> Keep employee details up to date for accurate salary and attendance calculation.</div>
+    </div>
   </div>
-</div>'''
+</div>
+
+<script>
+document.addEventListener('keydown', function(e) {{
+  if ((e.ctrlKey || e.metaKey) && e.key === 's') {{
+    e.preventDefault();
+    document.getElementById('aempForm').requestSubmit();
+  }}
+}});
+</script>'''
         return self._layout('New Employee', 'Add Employee', content, 'salary')
 
 
@@ -469,7 +1143,7 @@ class SalaryPagesMixin:
           </div>
         </div>
         <div class="d-flex gap-2">
-          <button type="submit" class="btn btn-primary btn-lg"><i class="bi bi-check-circle"></i> Update Employee</button>
+          <button type="submit" class="btn btn-primary btn-lg" title="Save (Ctrl+S)"><i class="bi bi-check-circle"></i> Update Employee</button>
           <a href="{back_href}" class="btn btn-outline-secondary btn-lg">Cancel</a>
         </div>
       </form>
@@ -658,7 +1332,7 @@ class SalaryPagesMixin:
       <i class="bi bi-calendar3"></i>
       <input type="month" name="month" value="{current_month}" class="form-control form-control-sm" onchange="this.form.submit()">
     </form>
-    <a href="/salary/{eid}?month={current_month}" class="btn btn-outline-secondary btn-sm"><i class="bi bi-arrow-left"></i> Back</a>
+    <a href="/salary?month={current_month}" class="btn btn-outline-secondary btn-sm"><i class="bi bi-arrow-left"></i> Back</a>
   </div>
 </div>
 <div class="form-section text-center py-5 text-muted">
@@ -741,7 +1415,7 @@ class SalaryPagesMixin:
       <i class="bi bi-calendar3"></i>
       <input type="month" name="month" value="{current_month}" class="form-control form-control-sm" onchange="this.form.submit()">
     </form>
-    <a href="/salary/{eid}?month={current_month}" class="btn btn-outline-secondary btn-sm"><i class="bi bi-arrow-left"></i> Back</a>
+    <a href="/salary?month={current_month}" class="btn btn-outline-secondary btn-sm"><i class="bi bi-arrow-left"></i> Back</a>
   </div>
 </div>
 {range_note}
@@ -810,7 +1484,7 @@ class SalaryPagesMixin:
       </div>
       <div class="d-flex gap-2">
         <a href="/salary/{eid}?month={current_month}" class="btn btn-outline-secondary">Cancel</a>
-        <button type="submit" class="btn btn-primary"><i class="bi bi-save"></i> Save Attendance</button>
+        <button type="submit" class="btn btn-primary" title="Save (Ctrl+S)"><i class="bi bi-save"></i> Save Attendance</button>
       </div>
     </div>
   </form>

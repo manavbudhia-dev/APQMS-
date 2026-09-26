@@ -1,14 +1,32 @@
 import re
+import sys
+import traceback
 import urllib.parse
 from http.cookies import SimpleCookie
 
 from utils.http_utils import redirect
+from app.ocr.engine import MAX_UPLOAD_BYTES as _OCR_MAX_UPLOAD_BYTES
 from utils.http_utils import json_response
 from utils.http_utils import html_response
 from utils.http_utils import get_session
 from utils.http_utils import sessions
 from utils.http_utils import parse_form
+from utils.http_utils import parse_multipart
+from utils.http_utils import is_same_origin
 from database import get_db
+
+
+_GENERIC_ERROR_PAGE = (
+    '<!DOCTYPE html><html><head><meta charset="UTF-8">'
+    '<title>Something went wrong</title></head><body style="font-family:sans-serif;'
+    'max-width:560px;margin:80px auto;text-align:center;color:#334155">'
+    '<h2 style="color:#DC2626">Something went wrong</h2>'
+    '<p>An unexpected error occurred while handling your request. '
+    'It has been logged. Please try again, and contact an administrator '
+    'if the problem continues.</p>'
+    '<p><a href="/dashboard">&larr; Back to Dashboard</a></p>'
+    '</body></html>'
+).encode()
 
 
 # ── Pagination defaults for list-style API endpoints ─────────
@@ -59,16 +77,50 @@ def _id(match, group=1):
     return int(match.group(group))
 
 
+# Upload limit plus headroom for the multipart envelope and other form fields.
+OCR_MAX_REQUEST_BYTES = _OCR_MAX_UPLOAD_BYTES + 1024 * 1024
+# Hard cap on the body size accepted for every *other* POST route (login,
+# settings, quotations, etc). Without a bound here, a client could point a
+# multi-gigabyte Content-Length at any non-OCR route and force the whole
+# thing into memory before auth/CSRF is even checked. Bump this (and add a
+# route-specific check like the OCR one above) if a route legitimately
+# needs to accept something larger than a normal form/backup-file body.
+MAX_REQUEST_BYTES = 64 * 1024 * 1024
+# Oversized uploads up to this size are read-and-discarded (in small chunks, so
+# memory stays flat) before replying; beyond it the connection is just closed.
+OCR_MAX_DRAIN_BYTES = 200 * 1024 * 1024
+
+
+def _is_safe_backup_filename(name):
+    """Guards the server-backup filename routes.
+
+    The routes' regex already excludes '/', so multi-segment traversal
+    like '../etc/passwd' can't reach here at all. But a bare '.' or '..'
+    is still a single, otherwise-valid path *component* that resolves to
+    the current/parent directory when joined onto a base directory — so
+    reject any name that is made up entirely of dots.
+    """
+    return bool(name) and name.strip('.') != ''
+
+
 class RoutingMixin:
     # ── GET ──────────────────────────────────────────────────
     GET_ROUTES = [
         (re.compile(r'^/dashboard$'),
          lambda self, m, qs, uid: self.send(*html_response(self.pg_dashboard(uid)))),
+        (re.compile(r'^/api/dashboard/quotations$'),
+         lambda self, m, qs, uid: self.send(*json_response(self._dashboard_quotations_fragment(
+             q=qs.get('q', [''])[0], status=qs.get('status', [''])[0],
+             date_from=qs.get('date_from', [''])[0], date_to=qs.get('date_to', [''])[0],
+             limit=qs.get('limit', [None])[0])))),
 
         # Customers
         (re.compile(r'^/customers$'),
          lambda self, m, qs, uid: self.send(*html_response(self.pg_customers(
-             q=qs.get('q', [''])[0], page=qs.get('page', ['1'])[0])))),
+             q=qs.get('q', [''])[0], page=qs.get('page', ['1'])[0],
+             sort=qs.get('sort', ['oldest'])[0], status=qs.get('status', ['all'])[0],
+             page_size=qs.get('page_size', ['10'])[0],
+             deleted=qs.get('deleted', ['0'])[0], blocked=qs.get('blocked', ['0'])[0])))),
         (re.compile(r'^/customers/(\d+)/products$'),
          lambda self, m, qs, uid: self.send(*html_response(self.pg_customer_products(_id(m))))),
 
@@ -83,17 +135,30 @@ class RoutingMixin:
         (re.compile(r'^/categories/(\d+)/items$'),
          lambda self, m, qs, uid: self.send(*html_response(self.pg_category_items(_id(m))))),
 
+        # Settings
+        (re.compile(r'^/settings$'),
+         lambda self, m, qs, uid: self.send(*html_response(self.pg_settings(uid)))),
+        (re.compile(r'^/settings/backup$'),
+         lambda self, m, qs, uid: self.send(*self._settings_backup(uid))),
+        (re.compile(r'^/settings/backup/server/([\w.\-]+)$'),
+         lambda self, m, qs, uid: self.send(*self._settings_server_backup_download(uid, m.group(1)))
+         if _is_safe_backup_filename(m.group(1)) else self.send(*html_response(self.pg_404(), 404))),
+        (re.compile(r'^/settings/export$'),
+         lambda self, m, qs, uid: self.send(*self._settings_export(uid))),
+
         # Salary
         (re.compile(r'^/salary$'),
          lambda self, m, qs, uid: self.send(*html_response(
              self.pg_salary_list(qs.get('month', [None])[0])))),
         (re.compile(r'^/salary/new$'),
-         lambda self, m, qs, uid: self.send(*html_response(self.pg_salary_new()))),
+         lambda self, m, qs, uid: self.send(*html_response(
+             self.pg_salary_new(qs.get('month', [None])[0])))),
         (re.compile(r'^/salary/(\d+)/attendance$'),
          lambda self, m, qs, uid: self.send(*html_response(
              self.pg_salary_attendance(_id(m), qs.get('month', [None])[0])))),
         (re.compile(r'^/salary/(\d+)/edit$'),
-         lambda self, m, qs, uid: self.send(*html_response(self.pg_salary_edit(_id(m))))),
+         lambda self, m, qs, uid: self.send(*html_response(
+             self.pg_salary_edit(_id(m), qs.get('month', [None])[0])))),
         (re.compile(r'^/salary/(\d+)$'),
          lambda self, m, qs, uid: self.send(*html_response(
              self.pg_salary_detail(_id(m), qs.get('month', [None])[0])))),
@@ -120,7 +185,9 @@ class RoutingMixin:
 
         # Proforma Invoices
         (re.compile(r'^/proforma$'),
-         lambda self, m, qs, uid: self.send(*html_response(self.pg_pilist()))),
+         lambda self, m, qs, uid: self.send(*html_response(self.pg_pilist(
+             q=qs.get('q', [''])[0], status=qs.get('status', [''])[0],
+             page=qs.get('page', ['1'])[0], page_size=qs.get('page_size', [None])[0])))),
         (re.compile(r'^/proforma/new$'),
          lambda self, m, qs, uid: self.send(*html_response(self.pg_pinew()))),
         (re.compile(r'^/proforma/(\d+)/pdf$'),
@@ -136,7 +203,9 @@ class RoutingMixin:
 
         # Packing Lists
         (re.compile(r'^/packing$'),
-         lambda self, m, qs, uid: self.send(*html_response(self.pg_pllist()))),
+         lambda self, m, qs, uid: self.send(*html_response(self.pg_pllist(
+             q=qs.get('q', [''])[0], status=qs.get('status', [''])[0],
+             page=qs.get('page', ['1'])[0], page_size=qs.get('page_size', [None])[0])))),
         (re.compile(r'^/packing/new$'),
          lambda self, m, qs, uid: self.send(*html_response(self.pg_plnew()))),
         (re.compile(r'^/packing/(\d+)/pdf$'),
@@ -154,10 +223,10 @@ class RoutingMixin:
         # unbounded SELECT * as the tables grow.
         (re.compile(r'^/api/items$'),
          lambda self, m, qs, uid: self.send(*json_response(self._api_list_items(qs)))),
-        (re.compile(r'^/api/customers$'),
-         lambda self, m, qs, uid: self.send(*json_response(self._api_list_customers(qs)))),
         (re.compile(r'^/api/customers/search$'),
          lambda self, m, qs, uid: self.send(*json_response(self._api_customers_search(qs)))),
+        (re.compile(r'^/api/customers$'),
+         lambda self, m, qs, uid: self.send(*json_response(self._api_list_customers(qs)))),
         (re.compile(r'^/api/customers/(\d+)/items$'),
          lambda self, m, qs, uid: self.send(*json_response(self._api_customer_items(_id(m))))),
         (re.compile(r'^/api/categories$'),
@@ -176,10 +245,53 @@ class RoutingMixin:
          lambda self, m, qs, uid: self.send(*json_response(self._quotations_fragment(
              q=qs.get('q', [''])[0], status=qs.get('status', [''])[0],
              page=qs.get('page', ['1'])[0], page_size=qs.get('page_size', [None])[0])))),
+        (re.compile(r'^/api/proforma$'),
+         lambda self, m, qs, uid: self.send(*json_response(self._proforma_fragment(
+             q=qs.get('q', [''])[0], status=qs.get('status', [''])[0],
+             page=qs.get('page', ['1'])[0], page_size=qs.get('page_size', [None])[0])))),
+        (re.compile(r'^/api/packing$'),
+         lambda self, m, qs, uid: self.send(*json_response(self._packing_fragment(
+             q=qs.get('q', [''])[0], status=qs.get('status', [''])[0],
+             page=qs.get('page', ['1'])[0], page_size=qs.get('page_size', [None])[0])))),
+
+        # Business Metrics
+        (re.compile(r'^/metrics$'),
+         lambda self, m, qs, uid: self.send(*html_response(self.pg_metrics(uid)))),
+
+        # Scan & Import (OCR)
+        (re.compile(r'^/ocr$'),
+         lambda self, m, qs, uid: self.send(*html_response(self.pg_ocr(uid)))),
+        (re.compile(r'^/ocr/(\d+)$'),
+         lambda self, m, qs, uid: self.send(*html_response(self.pg_ocr_detail(uid, _id(m))))),
+        (re.compile(r'^/ocr/(\d+)/file$'),
+         lambda self, m, qs, uid: self.serve_ocr_file(_id(m))),
     ]
 
     # ── POST ─────────────────────────────────────────────────
     POST_ROUTES = [
+        # Financial Year
+        (re.compile(r'^/financial-year/select$'),
+         lambda self, m, form, uid: self.handle_fy_select(form, uid)),
+        (re.compile(r'^/financial-year/add$'),
+         lambda self, m, form, uid: self.handle_fy_add(form, uid)),
+
+        # Settings
+        (re.compile(r'^/settings/profile$'),
+         lambda self, m, form, uid: self.handle_profile_update(form, uid)),
+        (re.compile(r'^/settings/users/(\d+)/toggle-status$'),
+         lambda self, m, form, uid: self.send(*self._toggle_user_status(uid, _id(m)))),
+        (re.compile(r'^/settings/users/(\d+)/delete$'),
+         lambda self, m, form, uid: self.send(*self._delete_user(uid, _id(m)))),
+        (re.compile(r'^/settings/restore$'),
+         lambda self, m, form, uid: self.handle_settings_restore(form, uid)),
+        (re.compile(r'^/settings/backup$'),
+         lambda self, m, form, uid: self.handle_settings_backup_download(form, uid)),
+        (re.compile(r'^/settings/backup/server$'),
+         lambda self, m, form, uid: self.handle_settings_backup_server(form, uid)),
+        (re.compile(r'^/settings/backup/server/([\w.\-]+)/delete$'),
+         lambda self, m, form, uid: self.handle_settings_server_backup_delete(form, uid, m.group(1))
+         if _is_safe_backup_filename(m.group(1)) else self.send(*html_response(self.pg_404(), 404))),
+
         # Customers
         (re.compile(r'^/customers/add$'),
          lambda self, m, form, uid: self.handle_customer_add(form)),
@@ -189,6 +301,8 @@ class RoutingMixin:
          lambda self, m, form, uid: self.handle_customer_edit(_id(m), form)),
         (re.compile(r'^/customers/(\d+)/items$'),
          lambda self, m, form, uid: self.handle_customer_items(_id(m), form)),
+        (re.compile(r'^/customers/bulk-delete$'),
+         lambda self, m, form, uid: self._delete_customers_bulk(form.get('ids', ''))),
         (re.compile(r'^/customers/(\d+)/delete$'),
          lambda self, m, form, uid: self._delete_customer(_id(m))),
 
@@ -205,6 +319,8 @@ class RoutingMixin:
         # Items
         (re.compile(r'^/items/add$'),
          lambda self, m, form, uid: self.handle_item_add(form)),
+        (re.compile(r'^/api/items/add$'),
+         lambda self, m, form, uid: self.handle_item_add_json(form)),
         (re.compile(r'^/items/(\d+)/edit$'),
          lambda self, m, form, uid: self.handle_item_edit(_id(m), form)),
         (re.compile(r'^/items/(\d+)/delete$'),
@@ -233,6 +349,8 @@ class RoutingMixin:
         (re.compile(r'^/proforma/(\d+)/status$'),
          lambda self, m, form, uid: self._set_status(
              'proforma_invoices', _id(m), form, '/proforma/{}')),
+        (re.compile(r'^/proforma/(\d+)/duplicate$'),
+         lambda self, m, form, uid: self.handle_proforma_duplicate(_id(m), uid)),
         (re.compile(r'^/proforma/(\d+)/delete$'),
          lambda self, m, form, uid: self._delete_proforma(_id(m))),
 
@@ -250,18 +368,77 @@ class RoutingMixin:
         # Salary
         (re.compile(r'^/salary/new$'),
          lambda self, m, form, uid: self.handle_employee_add(form)),
+        (re.compile(r'^/salary/advance/bulk$'),
+         lambda self, m, form, uid: self.handle_advance_bulk(form)),
         (re.compile(r'^/salary/(\d+)/attendance/clear$'),
          lambda self, m, form, uid: self.handle_attendance_clear(_id(m), form)),
+        (re.compile(r'^/salary/(\d+)/attendance/mark$'),
+         lambda self, m, form, uid: self.handle_attendance_quick_mark(_id(m), form)),
         (re.compile(r'^/salary/(\d+)/attendance$'),
          lambda self, m, form, uid: self.handle_attendance_save(_id(m), form)),
         (re.compile(r'^/salary/(\d+)/edit$'),
          lambda self, m, form, uid: self.handle_employee_edit(_id(m), form)),
         (re.compile(r'^/salary/(\d+)/delete$'),
          lambda self, m, form, uid: self._delete_employee(_id(m))),
+
+        # Business Metrics
+        (re.compile(r'^/metrics/refresh$'),
+         lambda self, m, form, uid: self.handle_metrics_refresh(form, uid)),
+
+        # Scan & Import (OCR)
+        (re.compile(r'^/ocr/upload$'),
+         lambda self, m, form, uid: self.handle_ocr_upload(form, uid)),
+        (re.compile(r'^/ocr/(\d+)/save$'),
+         lambda self, m, form, uid: self.handle_ocr_save(_id(m), form, uid)),
+        (re.compile(r'^/ocr/(\d+)/quotation$'),
+         lambda self, m, form, uid: self.handle_ocr_quotation(_id(m), form, uid)),
+        (re.compile(r'^/ocr/(\d+)/delete$'),
+         lambda self, m, form, uid: self.handle_ocr_delete(_id(m), uid)),
+    ]
+
+    # Administrative POST endpoints: single/bulk deletes of customers and
+    # catalog items, plus salary actions (adding an employee, bulk salary
+    # advances). Their handlers never even receive the session, so the
+    # only place left to enforce "admin only" is here in the router —
+    # mirroring the gate already applied to GET/POST /register above.
+    ADMIN_ONLY_POST_PATTERNS = [
+        re.compile(r'^/customers/(\d+)/delete$'),
+        re.compile(r'^/customers/bulk-delete$'),
+        re.compile(r'^/items/(\d+)/delete$'),
+        re.compile(r'^/items/bulk-delete$'),
+        re.compile(r'^/salary/(\d+)/delete$'),
+        re.compile(r'^/salary/new$'),
+        re.compile(r'^/salary/advance/bulk$'),
     ]
 
     # ── DISPATCH ─────────────────────────────────────────────
+    # Public entry points: catch anything an inner handler raises so a
+    # bug (a bad int()/float() conversion on attacker-influenced input,
+    # a None where a row was expected, etc.) becomes a generic, logged
+    # 500 instead of an unhandled exception. That matters more here than
+    # it might elsewhere in a typical framework: this app's WSGI adapter
+    # (passenger_wsgi.py) is the only thing standing between an
+    # exception and the client, and without this it will happily hand
+    # back a full Python traceback — file paths, query text, internals —
+    # to whoever triggered it. Catching here means that never depends on
+    # which entry point (socket server vs WSGI) is running.
     def do_GET(self):
+        try:
+            return self._do_GET()
+        except Exception:
+            traceback.print_exc(file=sys.stderr)
+            return self.send(_GENERIC_ERROR_PAGE, 500,
+                              [('Content-Type', 'text/html; charset=utf-8')])
+
+    def do_POST(self):
+        try:
+            return self._do_POST()
+        except Exception:
+            traceback.print_exc(file=sys.stderr)
+            return self.send(_GENERIC_ERROR_PAGE, 500,
+                              [('Content-Type', 'text/html; charset=utf-8')])
+
+    def _do_GET(self):
         parsed = urllib.parse.urlparse(self.path)
         path = parsed.path
         qs = urllib.parse.parse_qs(parsed.query)
@@ -303,13 +480,80 @@ class RoutingMixin:
 
         return self.send(*html_response(self.pg_404(), 404))
 
-    def do_POST(self):
+    def _do_POST(self):
         parsed = urllib.parse.urlparse(self.path)
         path = parsed.path
-        length = int(self.headers.get('Content-Length', 0))
-        body = self.rfile.read(length).decode('utf-8', errors='replace')
+        try:
+            length = int(self.headers.get('Content-Length', 0))
+        except (TypeError, ValueError):
+            length = 0
+        # A negative (or garbage) Content-Length is nonsensical, and passing
+        # it straight to self.rfile.read() makes a plain socket file object
+        # read until EOF instead of a bounded amount — treat it as no body.
+        length = max(0, length)
+
+        # Enforce a hard cap on body size for *every* POST route, before any
+        # bytes are read and before auth/CSRF checks run. Without this, an
+        # unauthenticated client could point a multi-gigabyte Content-Length
+        # at /login (or any other route) and force the whole thing into
+        # memory. /ocr/upload legitimately accepts larger file uploads, so
+        # it gets its own, larger, endpoint-specific limit; every other
+        # route is capped at MAX_REQUEST_BYTES.
+        is_ocr_upload = path == '/ocr/upload'
+        max_allowed = OCR_MAX_REQUEST_BYTES if is_ocr_upload else MAX_REQUEST_BYTES
+        if length > max_allowed:
+            # Refuse before reading: the body would otherwise be pulled fully
+            # into memory just to be rejected.
+            self.close_connection = True
+            remaining = length
+            if length <= OCR_MAX_DRAIN_BYTES:               # let the browser finish sending, so it
+                while remaining > 0:                          # sees this message, not a reset connection
+                    chunk = self.rfile.read(min(65536, remaining))
+                    if not chunk:
+                        break
+                    remaining -= len(chunk)
+            if is_ocr_upload:
+                body_html = ('<h2 style="color:#DC2626">File too large</h2>'
+                             '<p>That upload is over the size limit for Scan &amp; Import.</p>'
+                             '<p><a href="/ocr">&larr; Back</a></p>')
+            else:
+                body_html = ('<h2 style="color:#DC2626">Request too large</h2>'
+                             '<p>That request exceeds the maximum allowed size.</p>'
+                             '<p><a href="/dashboard">&larr; Back to Dashboard</a></p>')
+            return self.send(*html_response(
+                '<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Request too large</title></head>'
+                '<body style="font-family:sans-serif;max-width:560px;margin:80px auto;text-align:center">'
+                + body_html + '</body></html>', 413))
+        raw_body = self.rfile.read(length)
         ct = self.headers.get('Content-Type', '')
-        form = parse_form(body, ct)
+        if 'multipart/form-data' in ct:
+            # Binary uploads (e.g. a database backup) must be parsed from
+            # the raw bytes — decoding the whole body as UTF-8 first (as
+            # every other content type does below) would corrupt any
+            # non-text file content before it's ever inspected.
+            form = parse_multipart(raw_body, ct)
+        else:
+            body = raw_body.decode('utf-8', errors='replace')
+            form = parse_form(body, ct)
+
+        # Cross-site request forgery check — applies to every POST route,
+        # including ones that don't (yet) carry their own per-form CSRF
+        # token. See is_same_origin() for why this is safe to enforce
+        # unconditionally. Body is read above first so the connection
+        # stays healthy even when this rejects the request.
+        if not is_same_origin(self.headers, path):
+            return self.send(*html_response(
+                '<!DOCTYPE html><html><head><meta charset="UTF-8">'
+                '<title>Request blocked</title></head><body style="font-family:sans-serif;'
+                'max-width:560px;margin:80px auto;text-align:center;color:#334155">'
+                '<h2 style="color:#DC2626">Request blocked</h2>'
+                '<p>This request could not be verified as coming from this site '
+                '(Origin/Referer did not match) and was rejected. If you followed '
+                'a link or bookmark to submit this, please go back and try again '
+                'from within the app.</p>'
+                '<p><a href="/dashboard">&larr; Back to Dashboard</a></p>'
+                '</body></html>', 403))
+
         sess = get_session(self.headers.get('Cookie'))
         user_id = sess.get('user_id')
 
@@ -324,6 +568,9 @@ class RoutingMixin:
             return self.handle_register(form)
         if path == '/change-password':
             return self.handle_change_password(form, user_id)
+
+        if any(p.match(path) for p in self.ADMIN_ONLY_POST_PATTERNS) and sess.get('role') != 'admin':
+            return self.send(*redirect('/dashboard'))
 
         for pattern, handler in self.POST_ROUTES:
             match = pattern.match(path)
@@ -353,93 +600,14 @@ class RoutingMixin:
         finally:
             db.close()
 
-    def _api_customer_items(self, cid):
-        db = get_db()
-        try:
-            return [dict(r) for r in db.execute(
-                "SELECT i.* FROM items i "
-                "INNER JOIN customer_items ci ON i.id = ci.item_id "
-                "WHERE ci.customer_id = ? ORDER BY i.item_name", (cid,)).fetchall()]
-        finally:
-            db.close()
-
-    def _api_list_categories(self):
-        db = get_db()
-        try:
-            return [dict(r) for r in db.execute(
-                "SELECT * FROM categories ORDER BY name").fetchall()]
-        finally:
-            db.close()
-
-    def _api_category_items(self, catid):
-        db = get_db()
-        try:
-            return [dict(r) for r in db.execute(
-                "SELECT i.* FROM items i "
-                "INNER JOIN item_categories ic ON i.id = ic.item_id "
-                "WHERE ic.category_id = ? ORDER BY i.item_name", (catid,)).fetchall()]
-        finally:
-            db.close()
-
-    def _api_items_filtered(self, qs):
-        # Filters by customer and/or category (either or both query
-        # params may be omitted; when both are given, items must match
-        # both to be included). Used by the quotation item picker so a
-        # customer filter and a category filter can be combined instead
-        # of one silently overriding the other.
-        customer_id = qs.get('customer_id', [None])[0]
-        category_id = qs.get('category_id', [None])[0]
-        sql = "SELECT DISTINCT i.* FROM items i WHERE 1=1"
-        params = []
-        if customer_id:
-            sql += " AND i.id IN (SELECT item_id FROM customer_items WHERE customer_id=?)"
-            params.append(int(customer_id))
-        if category_id:
-            sql += " AND i.id IN (SELECT item_id FROM item_categories WHERE category_id=?)"
-            params.append(int(category_id))
-        sql += " ORDER BY i.item_name"
-        db = get_db()
-        try:
-            return [dict(r) for r in db.execute(sql, params).fetchall()]
-        finally:
-            db.close()
-
-    def _api_items_search(self, qs):
-        # Thin adapter: turns querystring params into the kwargs
-        # `_items_fragment` (ItemPagesMixin) already expects, so the
-        # item-catalog page's live search/sort/filter/pagination has a
-        # real endpoint to call instead of 404ing.
-        def _first(key, default=''):
-            return qs.get(key, [default])[0]
-        return self._items_fragment(
-            q=_first('q'), page=_first('page', '1'),
-            sort=_first('sort', 'name'), direction=_first('direction', 'asc'),
-            type_filter=_first('type'), units=_first('units'),
-            rate_min=_first('rate_min'), rate_max=_first('rate_max'),
-            page_size=_first('page_size', '10'))
-
     def _api_customers_search(self, qs):
-        # Thin adapter (mirrors `_api_items_search`): the customers page's
-        # live search/pagination posts here and expects the fragment shape
-        # `_customers_fragment` returns (rows_html/pagination_html/etc.),
-        # not the plain row array `_api_list_customers` returns for
-        # `/api/customers` -- those two are different consumers.
+        # Adapter for the Customer Management page's live search / sort /
+        # status filter / pagination (see CustomerPagesMixin).
         def _first(key, default=''):
             return qs.get(key, [default])[0]
-        return self._customers_fragment(q=_first('q'), page=_first('page', '1'))
-
-    def _api_proforma_items(self, pid):
-        db = get_db()
-        try:
-            items = [dict(r) for r in db.execute(
-                "SELECT pii.*, i.unit FROM proforma_invoice_items pii "
-                "LEFT JOIN items i ON pii.item_id = i.id "
-                "WHERE pii.proforma_id = ? ORDER BY pii.sort_order", (pid,)).fetchall()]
-            pi = db.execute(
-                "SELECT customer_id FROM proforma_invoices WHERE id=?", (pid,)).fetchone()
-            return {'items': items, 'customer_id': pi['customer_id'] if pi else None}
-        finally:
-            db.close()
+        return self._customers_fragment(
+            q=_first('q'), page=_first('page', '1'), sort=_first('sort', 'oldest'),
+            status=_first('status', 'all'), page_size=_first('page_size', '10'))
 
     def api_search(self, q):
         """Backs the global topbar search box (`/api/search?q=...`).
@@ -509,15 +677,131 @@ class RoutingMixin:
         finally:
             db.close()
 
-    # ── POST action helpers (delete / status) ───────────────
-    def _delete_customer(self, cid):
+    def _api_customer_items(self, cid):
         db = get_db()
         try:
-            db.execute("DELETE FROM customers WHERE id=?", (cid,))
-            db.commit()
+            return [dict(r) for r in db.execute(
+                "SELECT i.* FROM items i "
+                "INNER JOIN customer_items ci ON i.id = ci.item_id "
+                "WHERE ci.customer_id = ? ORDER BY i.item_name", (cid,)).fetchall()]
         finally:
             db.close()
-        return self.send(*redirect('/customers'))
+
+    def _api_list_categories(self):
+        db = get_db()
+        try:
+            return [dict(r) for r in db.execute(
+                "SELECT * FROM categories ORDER BY name").fetchall()]
+        finally:
+            db.close()
+
+    def _api_category_items(self, catid):
+        db = get_db()
+        try:
+            return [dict(r) for r in db.execute(
+                "SELECT i.* FROM items i "
+                "INNER JOIN item_categories ic ON i.id = ic.item_id "
+                "WHERE ic.category_id = ? ORDER BY i.item_name", (catid,)).fetchall()]
+        finally:
+            db.close()
+
+    def _api_items_filtered(self, qs):
+        # Filters by customer and/or category (either or both query
+        # params may be omitted; when both are given, items must match
+        # both to be included). Used by the quotation item picker so a
+        # customer filter and a category filter can be combined instead
+        # of one silently overriding the other.
+        def _valid_id(raw):
+            # A non-numeric value here used to blow up with an unhandled
+            # ValueError (500). Treat anything that isn't a real ID as
+            # "no filter" instead of erroring out.
+            if raw is None:
+                return None
+            try:
+                return int(raw)
+            except (TypeError, ValueError):
+                return None
+
+        customer_id = _valid_id(qs.get('customer_id', [None])[0])
+        category_id = _valid_id(qs.get('category_id', [None])[0])
+        limit, offset = _pagination(qs)
+        sql = "SELECT DISTINCT i.* FROM items i WHERE 1=1"
+        params = []
+        if customer_id is not None:
+            sql += " AND i.id IN (SELECT item_id FROM customer_items WHERE customer_id=?)"
+            params.append(customer_id)
+        if category_id is not None:
+            sql += " AND i.id IN (SELECT item_id FROM item_categories WHERE category_id=?)"
+            params.append(category_id)
+        # Same pagination guard as every other list endpoint, so this can't
+        # be used to pull the whole items table by simply omitting both
+        # filter params.
+        sql += " ORDER BY i.item_name LIMIT ? OFFSET ?"
+        params.extend([limit, offset])
+        db = get_db()
+        try:
+            return [dict(r) for r in db.execute(sql, params).fetchall()]
+        finally:
+            db.close()
+
+    def _api_items_search(self, qs):
+        # Thin adapter: turns querystring params into the kwargs
+        # `_items_fragment` (ItemPagesMixin) already expects, so the
+        # item-catalog page's live search/sort/filter/pagination has a
+        # real endpoint to call instead of 404ing.
+        def _first(key, default=''):
+            return qs.get(key, [default])[0]
+        return self._items_fragment(
+            q=_first('q'), page=_first('page', '1'),
+            sort=_first('sort', 'name'), direction=_first('direction', 'asc'),
+            type_filter=_first('type'), units=_first('units'),
+            rate_min=_first('rate_min'), rate_max=_first('rate_max'),
+            page_size=_first('page_size', '10'))
+
+    def _api_proforma_items(self, pid):
+        db = get_db()
+        try:
+            items = [dict(r) for r in db.execute(
+                "SELECT pii.*, i.unit FROM proforma_invoice_items pii "
+                "LEFT JOIN items i ON pii.item_id = i.id "
+                "WHERE pii.proforma_id = ? ORDER BY pii.sort_order", (pid,)).fetchall()]
+            pi = db.execute(
+                "SELECT customer_id FROM proforma_invoices WHERE id=?", (pid,)).fetchone()
+            return {'items': items, 'customer_id': pi['customer_id'] if pi else None}
+        finally:
+            db.close()
+
+    # ── POST action helpers (delete / status) ───────────────
+    def _customer_in_use(self, db, cid):
+        """Number of quotations / proforma invoices / packing lists that
+        still point at this customer. Those rows carry a foreign key with
+        no ON DELETE action, so such a customer can't be removed."""
+        total = 0
+        for table in ('quotations', 'proforma_invoices', 'packing_lists'):
+            total += db.execute(
+                f"SELECT COUNT(*) c FROM {table} WHERE customer_id=?", (cid,)).fetchone()['c']
+        return total
+
+    def _delete_customer(self, cid):
+        return self._delete_customers_bulk(str(cid))
+
+    def _delete_customers_bulk(self, ids_raw):
+        ids = [int(x) for x in str(ids_raw).split(',') if x.strip().isdigit()]
+        deleted = blocked = 0
+        if ids:
+            db = get_db()
+            try:
+                for cid in ids:
+                    if self._customer_in_use(db, cid):
+                        blocked += 1
+                        continue
+                    db.execute("DELETE FROM customer_items WHERE customer_id=?", (cid,))
+                    db.execute("DELETE FROM customers WHERE id=?", (cid,))
+                    deleted += 1
+                db.commit()
+            finally:
+                db.close()
+        return self.send(*redirect(f'/customers?deleted={deleted}&blocked={blocked}'))
 
     def _delete_category(self, cid):
         db = get_db()
@@ -581,8 +865,15 @@ class RoutingMixin:
         return self.send(*redirect('/quotations'))
 
     def _delete_proforma(self, pid):
+        # A packing list generated from this proforma is a real, historical
+        # record in its own right (goods already shipped) — it shouldn't be
+        # deleted or blocked, just unlinked from the proforma it came from,
+        # same idea as how _delete_item nulls out pointers instead of
+        # cascading. NOTE: assumes `packing_lists.proforma_id`; adjust if
+        # your schema names it differently.
         db = get_db()
         try:
+            db.execute("UPDATE packing_lists SET proforma_id=NULL WHERE proforma_id=?", (pid,))
             db.execute("DELETE FROM proforma_invoice_items WHERE proforma_id=?", (pid,))
             db.execute("DELETE FROM proforma_invoices WHERE id=?", (pid,))
             db.commit()
@@ -604,8 +895,12 @@ class RoutingMixin:
         return self.send(*redirect('/packing'))
 
     def _delete_employee(self, eid):
+        # NOTE: assumes a `salary_advances` table keyed by `employee_id`,
+        # matching the naming used by `attendance` — adjust the table/column
+        # name below if your schema calls it something else.
         db = get_db()
         try:
+            db.execute("DELETE FROM salary_advances WHERE employee_id=?", (eid,))
             db.execute("DELETE FROM attendance WHERE employee_id=?", (eid,))
             db.execute("DELETE FROM employees WHERE id=?", (eid,))
             db.commit()
@@ -613,8 +908,23 @@ class RoutingMixin:
             db.close()
         return self.send(*redirect('/salary'))
 
+    # Recognized status values per table. `form.get('status', 'Draft')` only
+    # ever falls back to 'Draft' when the key is *missing*; a client can
+    # still submit `status=` (empty) or any arbitrary/misspelled string.
+    # NOTE: these value sets are placeholders based on the tables' apparent
+    # purpose — replace them with whatever status values this app's UI
+    # actually offers for quotations / proforma invoices / packing lists.
+    _STATUS_WHITELIST = {
+        'quotations': {'Draft', 'Sent', 'Accepted', 'Rejected', 'Expired'},
+        'proforma_invoices': {'Draft', 'Sent', 'Accepted', 'Rejected', 'Expired'},
+        'packing_lists': {'Draft', 'Packed', 'Shipped', 'Delivered'},
+    }
+
     def _set_status(self, table, row_id, form, redirect_fmt):
-        status = form.get('status', 'Draft')
+        status = (form.get('status') or 'Draft').strip()
+        allowed = self._STATUS_WHITELIST.get(table)
+        if allowed is not None and status not in allowed:
+            status = 'Draft'
         db = get_db()
         try:
             db.execute(f"UPDATE {table} SET status=? WHERE id=?", (status, row_id))

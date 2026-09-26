@@ -1,6 +1,7 @@
 """SQLite database models and initialization for Aypee Quotation System."""
 import sqlite3, os, sys, hashlib, secrets
 from datetime import datetime
+from utils.dates import fy_bounds, fy_start_year
 
 DB_PATH = os.environ.get('QUOTATION_DB', os.path.join(os.path.dirname(os.path.abspath(__file__)), 'quotation.db'))
 
@@ -148,6 +149,9 @@ def init_db():
         password TEXT NOT NULL,
         full_name TEXT NOT NULL,
         role TEXT DEFAULT 'user',
+        email TEXT,
+        phone TEXT,
+        is_active INTEGER DEFAULT 1,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     );
     CREATE TABLE IF NOT EXISTS customers (
@@ -292,6 +296,18 @@ def init_db():
         weight REAL,
         remarks TEXT
     );
+    -- Indian financial years (1 April - 31 March), used to scope the
+    -- documents that carry their own date (quotations, proforma invoices,
+    -- packing lists). Items and customers are deliberately NOT linked to
+    -- a financial year — they're shared master data across all of them.
+    CREATE TABLE IF NOT EXISTS financial_years (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        start_year INTEGER UNIQUE NOT NULL,
+        label TEXT NOT NULL,
+        start_date TEXT NOT NULL,
+        end_date TEXT NOT NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
 
     -- SQLite does not automatically index foreign key columns (unlike most
     -- other RDBMSs), so JOINs and ON DELETE CASCADE lookups on these would
@@ -314,6 +330,60 @@ def init_db():
     CREATE INDEX IF NOT EXISTS idx_packing_list_items_packing_list_id ON packing_list_items(packing_list_id);
     CREATE INDEX IF NOT EXISTS idx_packing_list_items_item_id ON packing_list_items(item_id);
     CREATE INDEX IF NOT EXISTS idx_packing_list_bags_packing_list_item_id ON packing_list_bags(packing_list_item_id);
+    CREATE INDEX IF NOT EXISTS idx_financial_years_start_year ON financial_years(start_year);
+
+    -- Scan & Import (OCR) module: one row per uploaded document, plus the
+    -- line items read from it. All links to other tables are ON DELETE
+    -- SET NULL so deleting a customer/item/quotation elsewhere in the app
+    -- never gets blocked by an import that once referenced it.
+    CREATE TABLE IF NOT EXISTS ocr_documents (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        original_filename TEXT NOT NULL,
+        stored_filename TEXT,
+        file_type TEXT,
+        file_size INTEGER DEFAULT 0,
+        page_count INTEGER DEFAULT 0,
+        extraction_method TEXT,
+        ocr_confidence REAL,
+        raw_text TEXT,
+        status TEXT DEFAULT 'Processing',
+        error_message TEXT,
+        warnings TEXT,
+        customer_id INTEGER REFERENCES customers(id) ON DELETE SET NULL,
+        customer_match TEXT,
+        company_name TEXT,
+        contact_person TEXT,
+        address TEXT,
+        phone TEXT,
+        email TEXT,
+        gstin TEXT,
+        doc_reference TEXT,
+        doc_date TEXT,
+        subject TEXT,
+        quotation_id INTEGER REFERENCES quotations(id) ON DELETE SET NULL,
+        created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE TABLE IF NOT EXISTS ocr_document_items (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        ocr_document_id INTEGER NOT NULL REFERENCES ocr_documents(id) ON DELETE CASCADE,
+        item_id INTEGER REFERENCES items(id) ON DELETE SET NULL,
+        item_name TEXT,
+        description TEXT,
+        specification TEXT,
+        quantity REAL,
+        unit TEXT,
+        rate REAL,
+        catalog_rate REAL,
+        match_score REAL,
+        flags TEXT,
+        raw_text TEXT,
+        sort_order INTEGER DEFAULT 0
+    );
+    CREATE INDEX IF NOT EXISTS idx_ocr_documents_status ON ocr_documents(status);
+    CREATE INDEX IF NOT EXISTS idx_ocr_documents_customer_id ON ocr_documents(customer_id);
+    CREATE INDEX IF NOT EXISTS idx_ocr_document_items_doc ON ocr_document_items(ocr_document_id);
     """)
     # Migrations for existing databases: add columns that didn't exist in
     # earlier releases. Only "duplicate column name" is expected/benign
@@ -322,6 +392,16 @@ def init_db():
     _add_column_if_missing(c, "proforma_invoices", "order_date", "TEXT")
     _add_column_if_missing(c, "employees", "joining_date", "TEXT")
     _add_column_if_missing(c, "employees", "leaving_date", "TEXT")
+    _add_column_if_missing(c, "users", "email", "TEXT")
+    _add_column_if_missing(c, "users", "phone", "TEXT")
+    _add_column_if_missing(c, "users", "is_active", "INTEGER DEFAULT 1")
+    _add_column_if_missing(c, "customers", "is_active", "INTEGER DEFAULT 1")
+    # Customer's enquiry reference, printed on the quotation PDF (optional).
+    _add_column_if_missing(c, "quotations", "enquiry_no", "TEXT")
+    _add_column_if_missing(c, "quotations", "enquiry_date", "TEXT")
+    # Customer-visible note printed below the items table (the existing
+    # `notes` column stays internal-only). **double asterisks** mark bold.
+    _add_column_if_missing(c, "quotations", "customer_notes", "TEXT")
 
     # Seed a default admin user — but never with a hardcoded password.
     # Set ADMIN_PASSWORD in the environment before first run to choose
@@ -360,8 +440,50 @@ def init_db():
             ("STEEL BUSHD ROLLER CHAIN","Steel Bushed Roller Chain 152.40 MM Pitch","PLATE THICKNESS : 10 MM\nPIN DIA : 20 MM\nBUSH DIA : 28 MM\nROLLER DIA : 42 MM\nSIDE LINK : 60 X 10 MM","Mtr.",3200),
         ]
         c.executemany("INSERT INTO items (item_name,description,specification,unit,rate_per_unit) VALUES (?,?,?,?,?)", items)
+
+    # Seed the financial year containing today's date, so the FY switcher
+    # always has at least one entry to select on first run. Additional
+    # years are created on demand (see get_or_create_financial_year /
+    # the /financial-year/add route).
+    fy_count = c.execute("SELECT COUNT(*) FROM financial_years").fetchone()[0]
+    if fy_count == 0:
+        get_or_create_financial_year(conn, fy_start_year())
     conn.commit()
     conn.close()
+
+# ── FINANCIAL YEARS (Indian FY: 1 April - 31 March) ──
+def get_or_create_financial_year(conn, start_year):
+    """Ensure the financial year beginning 1 April `start_year` exists,
+    creating it if this is the first time it's been referenced (e.g. the
+    first login after the calendar rolls into a new FY, or an explicit
+    "create financial year" request), and return its row. Does not close
+    `conn`; the caller owns that."""
+    start, end, label = fy_bounds(start_year)
+    conn.execute(
+        "INSERT OR IGNORE INTO financial_years (start_year, label, start_date, end_date) "
+        "VALUES (?, ?, ?, ?)", (start_year, label, start, end))
+    return conn.execute(
+        "SELECT * FROM financial_years WHERE start_year=?", (start_year,)).fetchone()
+
+def list_financial_years(conn):
+    return conn.execute(
+        "SELECT * FROM financial_years ORDER BY start_year DESC").fetchall()
+
+def resolve_financial_year(conn, raw_fy_id):
+    """Resolve a session's raw `fy_id` value (a financial_years id, the
+    literal string 'all', or nothing/stale) into a financial_years Row —
+    or None, which means "All Financial Years" (no date filtering at
+    all). An explicit 'all' selection always wins; otherwise a valid id
+    is looked up; and with nothing usable, the FY containing today's date
+    is used (creating it on the fly if it's never been seen before) so
+    the app opens scoped to "this year" rather than to everything."""
+    if raw_fy_id == 'all':
+        return None
+    if raw_fy_id:
+        row = conn.execute("SELECT * FROM financial_years WHERE id=?", (raw_fy_id,)).fetchone()
+        if row:
+            return row
+    return get_or_create_financial_year(conn, fy_start_year())
 
 def gen_quotation_no(conn):
     year = datetime.now().strftime("%Y")

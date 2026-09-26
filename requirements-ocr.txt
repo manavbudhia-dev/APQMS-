@@ -1,0 +1,30 @@
+# Optional dependencies for the Scan & Import module (/ocr): read an
+# enquiry / purchase order from a scanned PDF, a photo, or a Word file and
+# turn it into a quotation. Nothing else in this app needs these — if they
+# aren't installed, /ocr shows an install hint and every other page works
+# exactly as before.
+#
+# Install with:
+#   pip install -r requirements-ocr.txt
+#
+# ALSO REQUIRED — the Tesseract OCR *program* (pip can't install it):
+#   Windows       installer from https://github.com/UB-Mannheim/tesseract/wiki
+#                 (found automatically at its default location, or set the
+#                 TESSERACT_CMD environment variable to the full path)
+#   Ubuntu/Debian sudo apt install tesseract-ocr
+#   macOS         brew install tesseract
+# Extra languages (e.g. Hindi/Punjabi) are separate Tesseract language packs;
+# then set OCR_LANG, e.g.  OCR_LANG=eng+hin
+#
+# What needs what:
+#   digital PDFs (real text) ... pdfplumber
+#   Word .docx files ........... python-docx
+#   scanned PDFs / photos ...... pdfplumber + pytesseract + Pillow + the Tesseract program
+#
+# NOTE ON HOSTING: shared/cPanel hosting (passenger_wsgi.py) usually can't
+# install the Tesseract program. There, digital PDFs and Word files still
+# work; scans and photos are declined with a clear message.
+pytesseract>=0.3.10,<0.4
+Pillow>=10.0
+pdfplumber>=0.10,<0.12
+python-docx>=1.0,<2

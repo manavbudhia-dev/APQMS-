@@ -1,1 +1,6 @@
-reportlab
+# Pinned to a minimum known-good major version rather than left
+# unbounded, so a fresh `pip install` can't silently pull in an
+# untested future major release (or, in principle, a compromised
+# package release under an unpinned range) on a server rebuild/redeploy.
+# Bump deliberately, not by accident.
+reportlab>=4.2,<5

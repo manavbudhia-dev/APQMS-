@@ -33,6 +33,10 @@ from app.views.quotation_pages import QuotationPagesMixin
 from app.views.proforma_pages import ProformaPagesMixin
 from app.views.packing_pages import PackingPagesMixin
 from app.views.salary_pages import SalaryPagesMixin
+from app.views.settings_pages import SettingsPagesMixin
+from app.views.financial_year_pages import FinancialYearPagesMixin
+from app.views.metrics_pages import BusinessMetricsPagesMixin
+from app.views.ocr_pages import OcrPagesMixin
 
 
 # ─────────────────────────────────────────────────────────────
@@ -49,6 +53,10 @@ class QuotationHandler(
         ProformaPagesMixin,
         PackingPagesMixin,
         SalaryPagesMixin,
+        SettingsPagesMixin,
+        FinancialYearPagesMixin,
+        BusinessMetricsPagesMixin,
+        OcrPagesMixin,
         BaseMixin,
         http.server.BaseHTTPRequestHandler):
     """
@@ -63,6 +71,11 @@ class QuotationHandler(
       - ProformaPagesMixin   -> proforma invoices (list/new/edit/detail/pdf)
       - PackingPagesMixin    -> packing lists (list/new/edit/detail/pdf)
       - SalaryPagesMixin     -> employees, attendance, salary
+      - SettingsPagesMixin   -> user profile, database backup, data export
+      - FinancialYearPagesMixin -> switch/create the Indian financial year
+        that scopes quotations/proforma invoices/packing lists + dashboard
+        (items & customers are unaffected — see app/models/base_mixin.py
+        _current_fy / _fy_switcher_html for the shared selection logic)
       - BaseMixin            -> send(), serve_static(), _layout(), log_message()
     """
     pass

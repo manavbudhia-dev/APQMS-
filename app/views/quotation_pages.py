@@ -8,10 +8,118 @@ from utils.http_utils import esc_nl
 from utils.http_utils import fmt_rupee
 from utils.http_utils import redirect
 from utils.http_utils import pdf_response
+from utils.http_utils import html_response
 from database import get_db
 from database import gen_quotation_no
-from app.generators.pdf_generator import build_pdf
+from app.generators.pdf_generator import build_pdf, enquiry_ref_text
+from utils.dates import date_in_fy
 from datetime import datetime
+
+
+# ── Customer-visible notes (rich text: bold only) ─────────────────────
+# Stored as plain text with **double asterisks** around bold parts — the
+# PDF generator already understands that format, and it means no HTML is
+# ever stored or rendered from user input.
+
+def _notes_to_html(value):
+    """Escape stored notes text and turn **bold** markers / newlines into
+    <b> and <br> for display (editor start-up content and the preview)."""
+    text = esc((value or '').replace('\r\n', '\n').replace('\r', '\n'))
+    parts = text.split('**')
+    out = ''.join(f'<b>{seg}</b>' if i % 2 else seg for i, seg in enumerate(parts))
+    return out.replace('\n', '<br>')
+
+
+_CUSTOMER_NOTES_JS = """
+(function () {
+  var ed = document.getElementById('cnEditor');
+  var out = document.getElementById('cnValue');
+  var btn = document.getElementById('cnBold');
+  if (!ed || !out || !btn) return;
+
+  function isBold(el) {
+    var t = el.tagName;
+    if (t === 'B' || t === 'STRONG') return true;
+    var fw = el.style && el.style.fontWeight;
+    return fw === 'bold' || fw === 'bolder' || parseInt(fw, 10) >= 600;
+  }
+
+  // Editor DOM -> plain text with **bold** markers.
+  function serialize() {
+    var buf = '';
+    function nl() { if (buf && buf.slice(-1) !== '\\n') buf += '\\n'; }
+    function walk(n, bold) {
+      if (n.nodeType === 3) {
+        var t = n.nodeValue.replace(/\\u00a0/g, ' ').replace(/\\*{2,}/g, '*');
+        if (t) buf += bold ? '**' + t + '**' : t;
+        return;
+      }
+      if (n.nodeType !== 1) return;
+      if (n.tagName === 'BR') { buf += '\\n'; return; }
+      var block = n.tagName === 'DIV' || n.tagName === 'P' || n.tagName === 'LI';
+      if (block) nl();
+      var b = bold || isBold(n);
+      for (var c = n.firstChild; c; c = c.nextSibling) walk(c, b);
+      if (block) nl();
+    }
+    walk(ed, false);
+    return buf.replace(/\\*\\*\\*\\*/g, '').replace(/^\\n+|\\n+$/g, '');
+  }
+
+  function sync() { out.value = serialize(); }
+
+  function refresh() {
+    var s = window.getSelection();
+    if (!s || !s.anchorNode || !ed.contains(s.anchorNode)) return;
+    var on = false;
+    try { on = document.queryCommandState('bold'); } catch (e) {}
+    btn.classList.toggle('active', on);
+  }
+
+  btn.addEventListener('mousedown', function (e) { e.preventDefault(); });  // keep the selection
+  btn.addEventListener('click', function () {
+    ed.focus();
+    document.execCommand('bold');
+    sync(); refresh();
+  });
+  ed.addEventListener('input', sync);
+  ed.addEventListener('paste', function (e) {       // paste as plain text only
+    e.preventDefault();
+    var t = (e.clipboardData || window.clipboardData).getData('text/plain');
+    document.execCommand('insertText', false, t);
+  });
+  document.addEventListener('selectionchange', refresh);
+  var form = ed.closest('form');
+  if (form) form.addEventListener('submit', sync);
+  sync();
+})();
+"""
+
+
+def _customer_notes_block(value=''):
+    """Form field for the customer-visible note: a small rich-text box with
+    a Bold button, mirrored into a hidden input (`customer_notes`)."""
+    return f"""
+      <div class="mt-3">
+        <label class="form-label">Customer Notes
+          <span class="text-muted fw-normal">(printed on the quotation, below the items table)</span></label>
+        <div class="d-flex align-items-center gap-2 mb-1">
+          <button type="button" class="btn btn-sm btn-outline-secondary" id="cnBold"
+                  title="Bold (Ctrl+B)" aria-label="Bold"><i class="bi bi-type-bold"></i></button>
+          <small class="text-muted" style="font-size:11px">Select text and click <b>B</b> (or press Ctrl+B) to make it bold.</small>
+        </div>
+        <div id="cnEditor" class="form-control" contenteditable="true" role="textbox"
+             aria-multiline="true" aria-label="Customer notes"
+             data-placeholder="Optional note shown to the customer, e.g. Side link size will be 50 mm x 12 mm"
+             style="min-height:96px;height:auto;overflow-wrap:anywhere;background:#FFFDF0;border-color:#F5D96B">{_notes_to_html(value)}</div>
+        <input type="hidden" name="customer_notes" id="cnValue" value="{esc(value or '')}">
+        <style>
+          #cnEditor:empty:before {{ content: attr(data-placeholder); color:#94A3B8; }}
+          #cnBold.active {{ background:#1E293B; color:#fff; border-color:#1E293B; }}
+        </style>
+        <script>{_CUSTOMER_NOTES_JS}</script>
+      </div>
+"""
 
 
 class QuotationSaveError(Exception):
@@ -41,7 +149,7 @@ class QuotationPagesMixin:
         qno_fn: () -> str, generates a candidate quotation_no.
         values_fn: (qno) -> full parameter tuple for the INSERT, in
             (quotation_no,date,customer_id,subject,terms,status,notes,
-            created_by) order.
+            created_by,enquiry_no,enquiry_date,customer_notes) order.
 
         A short randomized backoff runs between attempts (instead of
         retrying in a tight loop) so a second colliding request is
@@ -57,8 +165,9 @@ class QuotationPagesMixin:
             try:
                 cur = db.execute(
                     "INSERT INTO quotations "
-                    "(quotation_no,date,customer_id,subject,terms,status,notes,created_by) "
-                    "VALUES (?,?,?,?,?,?,?,?)",
+                    "(quotation_no,date,customer_id,subject,terms,status,notes,created_by,"
+                    "enquiry_no,enquiry_date,customer_notes) "
+                    "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
                     values_fn(qno))
                 return cur.lastrowid, qno
             except sqlite3.IntegrityError as e:
@@ -69,18 +178,42 @@ class QuotationPagesMixin:
             f'Could not generate a unique quotation number after '
             f'{max_attempts} attempts') from last_err
 
-    def _render_save_error(self, message, back_url):
+    @staticmethod
+    def _enquiry_from_form(form):
+        """Optional customer enquiry reference -> (enquiry_no, enquiry_date).
+
+        Both are free text, trimmed and length-capped. The date is only
+        meaningful alongside a number (the PDF prints nothing without
+        one), so it is dropped when the number is blank."""
+        no = (form.get('enquiry_no', '') or '').strip()[:60]
+        date = (form.get('enquiry_date', '') or '').strip()[:30] if no else ''
+        return no, date
+
+    @staticmethod
+    def _customer_notes_from_form(form):
+        """Customer-visible note (plain text with **bold** markers)."""
+        return (form.get('customer_notes', '') or '').replace('\r\n', '\n').strip()[:5000]
+
+    def _render_save_error(self, message, back_url, active='quotations'):
         """Simple error page for save failures (invalid item data, or a
-        quotation_no collision that survived every retry). Used instead
-        of redirecting to a fake "success" page so problems are always
-        visible to the user rather than silently swallowed."""
+        quotation_no/pi_no collision that survived every retry). Used
+        instead of redirecting to a fake "success" page so problems are
+        always visible to the user rather than silently swallowed.
+        Shared by the quotation and proforma invoice modules — `active`
+        picks which sidebar nav item is highlighted."""
         content = f'''
 <div class="form-section" style="max-width:640px;margin:48px auto;padding:32px">
-  <h5 style="color:#DC2626"><i class="bi bi-exclamation-triangle"></i> Could not save quotation</h5>
+  <h5 style="color:#DC2626"><i class="bi bi-exclamation-triangle"></i> Could not save</h5>
   <p style="margin-top:16px">{message}</p>
   <a href="{back_url}" class="btn btn-primary mt-2"><i class="bi bi-arrow-left"></i> Go back and try again</a>
 </div>'''
-        return self._layout('Error', 'Could Not Save', content, 'quotations')
+        # NB: every caller does `return self._render_save_error(...)`, so
+        # this must actually send the response (not just build/return the
+        # HTML) — returning a bare string here would silently drop the
+        # response, leaving the request hanging with no bytes ever
+        # written to the client.
+        return self.send(*html_response(
+            self._layout('Error', 'Could Not Save', content, active)))
 
     def handle_quotation_create(self, form, user_id):
         db = get_db()
@@ -97,11 +230,15 @@ class QuotationPagesMixin:
         if status not in self.QUOTATION_STATUSES:
             status = 'Draft'
 
+        enquiry_no, enquiry_date = self._enquiry_from_form(form)
+
         try:
             qid, _ = self._insert_quotation_row(
                 db, lambda: gen_quotation_no(db),
                 lambda qno: (qno, date, customer_id, form.get('subject', ''),
-                             form.get('terms', ''), status, form.get('notes', ''), user_id))
+                             form.get('terms', ''), status, form.get('notes', ''), user_id,
+                             enquiry_no, enquiry_date,
+                             self._customer_notes_from_form(form)))
         except QuotationNumberConflictError:
             db.rollback()
             db.close()
@@ -235,11 +372,13 @@ class QuotationPagesMixin:
         if status not in self.QUOTATION_STATUSES:
             status = q['status']
 
+        enquiry_no, enquiry_date = self._enquiry_from_form(form)
         db.execute(
             "UPDATE quotations SET date=?, customer_id=?, subject=?, terms=?, "
-            "status=?, notes=? WHERE id=?",
+            "status=?, notes=?, enquiry_no=?, enquiry_date=?, customer_notes=? WHERE id=?",
             (date, customer_id, form.get('subject', ''), form.get('terms', ''),
-             status, form.get('notes', ''), qid))
+             status, form.get('notes', ''), enquiry_no, enquiry_date,
+             self._customer_notes_from_form(form), qid))
 
         # Delete existing items
         db.execute("DELETE FROM quotation_items WHERE quotation_id=?", (qid,))
@@ -283,8 +422,12 @@ class QuotationPagesMixin:
         try:
             new_id, _ = self._insert_quotation_row(
                 db, lambda: gen_quotation_no(db),
+                # The enquiry reference is deliberately NOT copied: a
+                # repeat quotation answers a new enquiry, and a stale
+                # number would otherwise print on the PDF.
                 lambda qno: (qno, date, src['customer_id'], src['subject'],
-                             src['terms'], 'Draft', src['notes'], user_id))
+                             src['terms'], 'Draft', src['notes'], user_id,
+                             '', '', src['customer_notes'] or ''))
         except QuotationNumberConflictError:
             db.rollback()
             db.close()
@@ -358,9 +501,10 @@ class QuotationPagesMixin:
                      f'</td></tr>')
         return rows
 
-    def _quotations_empty_state(self, has_any, q, status):
+    def _quotations_empty_state(self, has_any, q, status, fy=None):
         """Illustration + message for zero results, whether the table is
-        truly empty or just has no matches for the current search/filter."""
+        truly empty or just has no matches for the current search/filter
+        (which now includes the selected financial year, if any)."""
         if not has_any:
             return ('<div class="q-empty">'
                     '<div class="q-empty-icon"><i class="bi bi-file-earmark-text"></i></div>'
@@ -369,12 +513,15 @@ class QuotationPagesMixin:
                     '<a href="/quotations/new" class="btn btn-primary btn-sm">'
                     '<i class="bi bi-plus-circle"></i> Create your first quotation</a>'
                     '</div>')
+        fy_note = f' in FY {esc(fy["label"])}' if fy is not None else ''
         return ('<div class="q-empty">'
                 '<div class="q-empty-icon"><i class="bi bi-search"></i></div>'
                 '<h6>No matching quotations</h6>'
                 '<p class="text-muted">Try a different search term'
                 + (f' or clear the "{esc(status)}" filter' if status else '')
-                + '.</p>'
+                + fy_note + '.'
+                + (' Switch financial year in the dropdown at the top of the page to see other years.' if fy is not None else '')
+                + '</p>'
                 '<button type="button" class="btn btn-outline-secondary btn-sm" onclick="qClearFilters()">'
                 '<i class="bi bi-x-circle"></i> Clear filters</button>'
                 '</div>')
@@ -444,7 +591,13 @@ class QuotationPagesMixin:
     def _quotations_fragment(self, q='', status='', page='1', page_size=None):
         """Fetch, filter, and paginate quotations; return rendered HTML
         fragments used both for the initial page load and the JSON API
-        that powers live search/filter/pagination without a full reload."""
+        that powers live search/filter/pagination without a full reload.
+
+        Scoped to the session's currently-selected financial year (see
+        BaseMixin._current_fy) unless "All Financial Years" is selected.
+        The quotation date is free text, not a real SQL date column, so
+        that part of the filtering happens in Python rather than SQL —
+        same approach the dashboard's date-range filter already uses."""
         q = (q or '').strip()
         status = status or ''
         try:
@@ -461,6 +614,8 @@ class QuotationPagesMixin:
         if page_size not in (10, 25, 50, 100):
             page_size = self.QUOTATIONS_PAGE_SIZE
 
+        fy = self._current_fy()
+
         db = get_db()
 
         search_where, search_params = [], []
@@ -475,44 +630,35 @@ class QuotationPagesMixin:
         # which empty-state message to show.
         has_any = db.execute("SELECT COUNT(*) c FROM quotations").fetchone()['c'] > 0
 
-        # Status counts respect the search term so chip counts stay accurate
-        # while typing, but not the status filter itself.
-        all_count = db.execute(
-            f"SELECT COUNT(*) c FROM quotations q LEFT JOIN customers c ON q.customer_id=c.id{search_sql}",
-            search_params).fetchone()['c']
-        status_counts = {}
-        for s in self.QUOTATION_STATUSES:
-            join = " AND" if search_where else " WHERE"
-            r = db.execute(
-                f"SELECT COUNT(*) c FROM quotations q LEFT JOIN customers c ON q.customer_id=c.id{search_sql}{join} q.status=?",
-                search_params + [s]).fetchone()
-            status_counts[s] = r['c']
+        # Every quotation matching the search term (all statuses) — the
+        # financial-year filter is applied here in Python, then status
+        # counts/pagination are all derived from this same filtered set so
+        # every number on the page reflects the selected year.
+        search_rows = db.execute(
+            f"SELECT q.*,c.company_name,c.contact_person FROM quotations q "
+            f"LEFT JOIN customers c ON q.customer_id=c.id{search_sql} "
+            f"ORDER BY q.created_at DESC", search_params).fetchall()
+        db.close()
+        search_rows = [r for r in search_rows if date_in_fy(r['date'], fy)]
 
-        where = list(search_where)
-        params = list(search_params)
-        if status:
-            where.append("q.status = ?")
-            params.append(status)
-        where_sql = (" WHERE " + " AND ".join(where)) if where else ""
+        all_count = len(search_rows)
+        status_counts = {s: 0 for s in self.QUOTATION_STATUSES}
+        for r in search_rows:
+            if r['status'] in status_counts:
+                status_counts[r['status']] += 1
 
-        total = db.execute(
-            f"SELECT COUNT(*) c FROM quotations q LEFT JOIN customers c ON q.customer_id=c.id{where_sql}",
-            params).fetchone()['c']
+        filtered_rows = [r for r in search_rows if not status or r['status'] == status]
+
+        total = len(filtered_rows)
         total_pages = max(1, math.ceil(total / page_size))
         page = min(page, total_pages)
         offset = (page - 1) * page_size
-
-        rows_data = db.execute(
-            f"SELECT q.*,c.company_name,c.contact_person FROM quotations q "
-            f"LEFT JOIN customers c ON q.customer_id=c.id{where_sql} "
-            f"ORDER BY q.created_at DESC LIMIT ? OFFSET ?",
-            params + [page_size, offset]).fetchall()
-        db.close()
+        rows_data = filtered_rows[offset:offset + page_size]
 
         if rows_data:
             rows_html = self._quotations_rows_html(rows_data, start_index=offset + 1)
         else:
-            rows_html = f'<tr><td colspan="8" class="p-0">{self._quotations_empty_state(has_any, q, status)}</td></tr>'
+            rows_html = f'<tr><td colspan="8" class="p-0">{self._quotations_empty_state(has_any, q, status, fy)}</td></tr>'
 
         range_start = 0 if total == 0 else offset + 1
         range_end = min(offset + page_size, total)
@@ -750,12 +896,21 @@ class QuotationPagesMixin:
     refresh();
   }});
 
-  document.getElementById('qDateInput').addEventListener('change', function(e) {{
+  var qDateInput = document.getElementById('qDateInput');
+  qDateInput.addEventListener('click', function(e) {{
+    // The native input is stretched invisibly over the whole button, but
+    // browsers only auto-open the calendar when the click lands exactly on
+    // the tiny native icon hotspot. Force it open on any click instead.
+    if (typeof this.showPicker === 'function') {{
+      try {{ this.showPicker(); }} catch (err) {{ /* ignore */ }}
+    }}
+  }});
+  qDateInput.addEventListener('change', function(e) {{
     if (!e.target.value) return;
     var d = new Date(e.target.value + 'T00:00:00');
     var day = String(d.getDate()).padStart(2, '0');
-    var month = d.toLocaleString('en-US', {{ month: 'short' }});
-    var formatted = day + ' ' + month + ', ' + d.getFullYear();
+    var month = String(d.getMonth() + 1).padStart(2, '0');
+    var formatted = day + ' - ' + month + ' - ' + d.getFullYear();
     searchInput.value = formatted;
     state.q = formatted;
     state.page = 1;
@@ -824,6 +979,13 @@ class QuotationPagesMixin:
         cat_opts = '<option value="">All Categories</option>'
         for cat in categories:
             cat_opts += f'<option value="{cat["id"]}">{esc(cat["name"])}</option>'
+        cat_opts_item = cat_opts.replace('All Categories', 'No category (optional)', 1)
+
+        common_units_q = ['Mtr.', 'Pcs.', 'Kg.', 'Set', 'Box']
+        existing_units_q = sorted({i['unit'] for i in items if i['unit']})
+        extra_units_q = [u for u in existing_units_q if u not in common_units_q]
+        unit_datalist_options_q = ''.join(
+            f'<option value="{esc(u)}">' for u in common_units_q + extra_units_q)
 
         status_opts = ''
         for s in self.QUOTATION_STATUSES:
@@ -859,6 +1021,28 @@ function escapeHtml(s) {{
 
 function categoryLabel(item) {{
   return (item.categories && item.categories.length) ? item.categories[0].name : 'General';
+}}
+
+// Wires a hidden native <input type=date> (stacked over the calendar
+// icon) to a visible "DD - MM - YYYY" text field: opening the icon
+// shows the real date picker, and picking a date fills the text
+// field in the format the rest of the app expects.
+function wireDatePicker(pickerId, fieldId) {{
+  const picker = document.getElementById(pickerId);
+  const field = document.getElementById(fieldId);
+  if (!picker || !field) return;
+  const parts = field.value.trim().split('-').map(function(s) {{ return s.trim(); }});
+  if (parts.length === 3 && parts[0].length === 2 && parts[2].length === 4) {{
+    picker.value = parts[2] + '-' + parts[1] + '-' + parts[0];
+  }}
+  picker.addEventListener('change', function(e) {{
+    if (!e.target.value) return;
+    const d = new Date(e.target.value + 'T00:00:00');
+    const day = String(d.getDate()).padStart(2, '0');
+    const month = String(d.getMonth() + 1).padStart(2, '0');
+    const year = d.getFullYear();
+    field.value = day + ' - ' + month + ' - ' + year;
+  }});
 }}
 
 function updateStatusDot() {{
@@ -1007,8 +1191,8 @@ function submitNewCustomer() {{
   const company = document.getElementById('newCompany').value.trim();
   const err = document.getElementById('addCustError');
   err.style.display = 'none';
-  if (!contact || !company) {{
-    err.textContent = 'Contact person and company name are required.';
+  if (!company) {{
+    err.textContent = 'Company name is required.';
     err.style.display = 'block';
     return;
   }}
@@ -1017,7 +1201,8 @@ function submitNewCustomer() {{
     address: document.getElementById('newAddress').value,
     phone: document.getElementById('newPhone').value,
     email: document.getElementById('newEmail').value,
-    gstin: document.getElementById('newGstin').value
+    gstin: document.getElementById('newGstin').value,
+    status: document.getElementById('newStatus').value
   }};
   fetch('/api/customers/add', {{
     method: 'POST',
@@ -1048,6 +1233,126 @@ function submitNewCustomer() {{
     }});
 }}
 
+function toggleBoldSelection(btn) {{
+  var wrap = btn.closest('.desc-field-wrap');
+  var ta = wrap ? wrap.querySelector('textarea') : null;
+  if (!ta) return;
+  var start = ta.selectionStart, end = ta.selectionEnd;
+  if (start === end) {{
+    alert('Select the text you want to bold first.');
+    return;
+  }}
+  var val = ta.value;
+  var selected = val.slice(start, end);
+  var before = val.slice(0, start);
+  var after = val.slice(end);
+  var alreadyBold = selected.length >= 4 && selected.startsWith('**') && selected.endsWith('**');
+  var replacement = alreadyBold ? selected.slice(2, -2) : ('**' + selected + '**');
+  ta.value = before + replacement + after;
+  ta.focus();
+  ta.selectionStart = start;
+  ta.selectionEnd = start + replacement.length;
+}}
+
+function updateCounter(el, counterId) {{
+  var counter = document.getElementById(counterId);
+  if (!counter) return;
+  var max = el.getAttribute('maxlength');
+  var len = el.value.length;
+  counter.textContent = len + '/' + max;
+  counter.classList.toggle('near-limit', !!max && len > max * 0.85 && len < max);
+  counter.classList.toggle('at-limit', !!max && len >= max);
+}}
+
+function formatPreviewText(text) {{
+  var div = document.createElement('div');
+  div.textContent = text || '';
+  var escaped = div.innerHTML;
+  var formatted = escaped.replace(/\\*\\*(.+?)\\*\\*/g, '<strong>$1</strong>').replace(/\\n/g, '<br>');
+  return formatted || '<span class="text-muted">Nothing to preview yet.</span>';
+}}
+
+function toggleDescPreview(btn) {{
+  var wrap = btn.closest('.desc-field-wrap');
+  var iconWrap = wrap.querySelector('.field-icon-wrap');
+  var ta = iconWrap.querySelector('textarea');
+  var previewBox = wrap.querySelector('.field-preview-box');
+  var showing = btn.classList.toggle('active');
+  if (showing) {{
+    previewBox.innerHTML = formatPreviewText(ta.value);
+    iconWrap.classList.add('d-none');
+    previewBox.classList.remove('d-none');
+    btn.innerHTML = '<i class="bi bi-eye-slash"></i> Edit';
+  }} else {{
+    iconWrap.classList.remove('d-none');
+    previewBox.classList.add('d-none');
+    btn.innerHTML = '<i class="bi bi-eye"></i> Preview';
+  }}
+}}
+
+function submitNewItem() {{
+  const name = document.getElementById('newItemName').value.trim();
+  const desc = document.getElementById('newItemDesc').value.trim();
+  const unit = document.getElementById('newItemUnit').value.trim();
+  const rateStr = document.getElementById('newItemRate').value.trim();
+  const err = document.getElementById('addItemError');
+  err.style.display = 'none';
+  if (!name) {{
+    err.textContent = 'Item name is required.';
+    err.style.display = 'block';
+    return;
+  }}
+  if (!desc) {{
+    err.textContent = 'Description is required.';
+    err.style.display = 'block';
+    return;
+  }}
+  if (!unit) {{
+    err.textContent = 'Unit is required.';
+    err.style.display = 'block';
+    return;
+  }}
+  const rate = parseFloat(rateStr);
+  if (!rateStr || isNaN(rate) || rate < 0) {{
+    err.textContent = 'Enter a valid rate.';
+    err.style.display = 'block';
+    return;
+  }}
+  const payload = {{
+    item_name: name,
+    unit: unit,
+    rate_per_unit: rate,
+    description: document.getElementById('newItemDesc').value,
+    specification: document.getElementById('newItemSpec').value
+  }};
+  fetch('/api/items/add', {{
+    method: 'POST',
+    headers: {{'Content-Type': 'application/json'}},
+    body: JSON.stringify(payload)
+  }}).then(function(r) {{ return r.json().then(function(d) {{ return {{ok: r.ok, data: d}}; }}); }})
+    .then(function(res) {{
+      if (!res.ok || !res.data.id) throw new Error(res.data.error || 'failed');
+      allItems.push({{
+        id: res.data.id, name: res.data.name, desc: res.data.desc, spec: res.data.spec,
+        unit: res.data.unit, rate: res.data.rate, categories: res.data.categories || []
+      }});
+      refreshItemOptions();
+      document.getElementById('itemSelect').value = String(res.data.id);
+      ['newItemName','newItemRate','newItemDesc','newItemSpec'].forEach(function(id) {{
+        document.getElementById(id).value = '';
+      }});
+      document.getElementById('newItemUnit').value = 'Mtr.';
+      updateCounter(document.getElementById('newItemDesc'), 'newItemDesc-counter');
+      updateCounter(document.getElementById('newItemSpec'), 'newItemSpec-counter');
+      const modalEl = document.getElementById('addItemModal');
+      (bootstrap.Modal.getInstance(modalEl) || new bootstrap.Modal(modalEl)).hide();
+    }})
+    .catch(function(e) {{
+      err.textContent = (e && e.message) || 'Could not add item. Please try again.';
+      err.style.display = 'block';
+    }});
+}}
+
 function submitQuotationForm() {{
   if (quotationItems.length === 0) {{
     alert('Please add at least one item to the quotation.');
@@ -1060,6 +1365,8 @@ window.addEventListener('DOMContentLoaded', function() {{
   refreshItemOptions();
   renderItems();
   checkValid();
+  wireDatePicker('qnDatePicker', 'qnDateField');
+  wireDatePicker('qnEnqDatePicker', 'qnEnqDateField');
 }});
 """
 
@@ -1096,9 +1403,10 @@ window.addEventListener('DOMContentLoaded', function() {{
         </div>
         <div class="col-md-4">
           <label class="form-label">Date</label>
-          <div class="input-icon">
+          <div class="input-icon date-icon">
             <i class="bi bi-calendar3"></i>
-            <input name="date" class="form-control" value="{esc(today)}">
+            <input type="date" class="date-icon-picker" id="qnDatePicker" tabindex="-1" aria-label="Pick a date">
+            <input name="date" id="qnDateField" class="form-control" value="{esc(today)}">
           </div>
         </div>
         <div class="col-md-4">
@@ -1122,6 +1430,22 @@ window.addEventListener('DOMContentLoaded', function() {{
           <div class="fw-bold" id="cName"></div>
           <div id="cCompany"></div>
           <small class="text-muted" id="cAddr" style="white-space:pre-line"></small>
+        </div>
+      </div>
+      <div class="row g-3 mt-1">
+        <div class="col-md-6">
+          <label class="form-label">Customer Enquiry No. <span class="text-muted fw-normal">(optional)</span></label>
+          <input name="enquiry_no" class="form-control" id="qnEnqNo" maxlength="60" value="" placeholder="e.g. ENQ/2026/118">
+          <small class="text-muted" style="font-size:11px">Leave blank if the customer gave no enquiry number.</small>
+        </div>
+        <div class="col-md-6">
+          <label class="form-label">Customer Enquiry Date <span class="text-muted fw-normal">(optional)</span></label>
+          <div class="input-icon date-icon">
+            <i class="bi bi-calendar3"></i>
+            <input type="date" class="date-icon-picker" id="qnEnqDatePicker" tabindex="-1" aria-label="Pick enquiry date">
+            <input name="enquiry_date" id="qnEnqDateField" class="form-control" maxlength="30" value="" placeholder="DD - MM - YYYY">
+          </div>
+          <small class="text-muted" style="font-size:11px">Printed on the quotation only when an enquiry number is entered.</small>
         </div>
       </div>
     </div>
@@ -1151,12 +1475,15 @@ window.addEventListener('DOMContentLoaded', function() {{
         </div>
       </div>
       <div class="field-hint-row">
-        <small>Add items from the catalog or search directly. Enter quantity for each item and add to the list.</small>
+        <small>Add items from the catalog or search directly, or use "New Item" above to add one on the spot. Enter quantity for each item and add to the list.</small>
         <a href="/categories"><i class="bi bi-gear"></i> Manage categories</a>
       </div>
 
       <div class="add-item-box">
-        <div class="box-label">Add Item</div>
+        <div class="d-flex justify-content-between align-items-center">
+          <div class="box-label">Add Item</div>
+          <button type="button" class="btn btn-sm btn-outline-secondary" data-bs-toggle="modal" data-bs-target="#addItemModal"><i class="bi bi-plus-lg"></i> New Item</button>
+        </div>
         <div class="row g-2 align-items-end">
           <div class="col-md-7">
             <label class="form-label">Item <span style="color:var(--primary)">*</span></label>
@@ -1164,7 +1491,7 @@ window.addEventListener('DOMContentLoaded', function() {{
           </div>
           <div class="col-md-2">
             <label class="form-label">Quantity <span style="color:var(--primary)">*</span></label>
-            <input type="number" class="form-control" id="qtyInput" min="0.01" step="0.01" value="1">
+            <input type="number" class="form-control" id="qtyInput" min="0.01" step="0.01" value="1" data-enter-action="addItemRow()">
           </div>
           <div class="col-md-3">
             <button type="button" class="btn btn-primary w-100" onclick="addItemRow()"><i class="bi bi-plus-circle"></i> Add Item</button>
@@ -1216,10 +1543,11 @@ window.addEventListener('DOMContentLoaded', function() {{
           <input name="subject" class="form-control" id="subjInput" placeholder="e.g. Sugar Elevator Chain" oninput="checkValid()" required>
         </div>
         <div class="col-md-6">
-          <label class="form-label">Notes (Internal)</label>
-          <textarea name="notes" class="form-control" rows="2" placeholder="Optional internal notes (not visible to customer)"></textarea>
+          <label class="form-label">Notes (Internal only)</label>
+          <textarea name="notes" class="form-control" rows="2" placeholder="Internal only — never printed on the quotation"></textarea>
         </div>
       </div>
+      {_customer_notes_block('')}
       <div class="mt-3">
         <label class="form-label">Terms &amp; Conditions</label>
         <textarea name="terms" class="form-control" rows="4">1. Rates are Ex-works.
@@ -1246,7 +1574,7 @@ window.addEventListener('DOMContentLoaded', function() {{
       <div class="total-line"><span>GST (18%):</span><strong id="sGst">Rs. 0</strong></div>
       <div class="grand-total-box"><span>Grand Total:</span><strong id="sGrand">Rs. 0</strong></div>
 
-      <button type="submit" class="btn btn-primary w-100 btn-lg mt-3" id="submitBtn"><i class="bi bi-file-earmark-check"></i> Create Quotation</button>
+      <button type="submit" class="btn btn-primary w-100 btn-lg mt-3" id="submitBtn" title="Save (Ctrl+S)"><i class="bi bi-file-earmark-check"></i> Create Quotation</button>
 
       <div class="info-box">
         <i class="bi bi-info-circle-fill"></i>
@@ -1279,24 +1607,125 @@ window.addEventListener('DOMContentLoaded', function() {{
     </div>
     <div class="modal-body">
       <div id="addCustError" class="alert alert-danger py-2" style="display:none"></div>
-      <div class="mb-2"><label class="form-label">Contact Person</label>
-        <input id="newContact" class="form-control" required></div>
-      <div class="mb-2"><label class="form-label">Company Name</label>
-        <input id="newCompany" class="form-control" required></div>
-      <div class="mb-2"><label class="form-label">Address</label>
-        <textarea id="newAddress" class="form-control" rows="3"></textarea></div>
       <div class="row">
-        <div class="col-6 mb-2"><label class="form-label">Phone</label>
-          <input id="newPhone" class="form-control"></div>
-        <div class="col-6 mb-2"><label class="form-label">Email</label>
-          <input id="newEmail" class="form-control"></div>
+        <div class="col-md-6 mb-2"><label class="form-label">Company Name <span class="text-danger">*</span></label>
+          <input id="newCompany" class="form-control" required data-enter-action="submitNewCustomer()"></div>
+        <div class="col-md-6 mb-2"><label class="form-label">Contact Person</label>
+          <input id="newContact" class="form-control" data-enter-action="submitNewCustomer()"></div>
       </div>
-      <div class="mb-2"><label class="form-label">GSTIN</label>
-        <input id="newGstin" class="form-control"></div>
+      <div class="mb-2"><label class="form-label">Address</label>
+        <textarea id="newAddress" class="form-control" rows="4" placeholder="e.g. STREET NO.1, ANAND NAGAR&#10;NEAR KIDZ NEST SCHOOL, MAKSUDAN&#10;JALANDHAR (PUNJAB), INDIA&#10;PIN CODE - 144008"></textarea></div>
+      <div class="row">
+        <div class="col-md-6 mb-2"><label class="form-label">Phone</label>
+          <input id="newPhone" class="form-control" data-enter-action="submitNewCustomer()"></div>
+        <div class="col-md-6 mb-2"><label class="form-label">Email</label>
+          <input id="newEmail" class="form-control" data-enter-action="submitNewCustomer()"></div>
+      </div>
+      <div class="row">
+        <div class="col-md-6 mb-2"><label class="form-label">GSTIN</label>
+          <input id="newGstin" class="form-control" data-enter-action="submitNewCustomer()"></div>
+        <div class="col-md-6 mb-2"><label class="form-label">Status</label>
+          <select id="newStatus" class="form-select">
+            <option value="active" selected>Active</option>
+            <option value="inactive">Inactive</option>
+          </select></div>
+      </div>
     </div>
     <div class="modal-footer">
       <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
       <button type="button" class="btn btn-primary" onclick="submitNewCustomer()"><i class="bi bi-plus-lg"></i> Add Customer</button>
+    </div>
+  </div></div>
+</div>
+
+<div class="modal fade" id="addItemModal" tabindex="-1">
+  <div class="modal-dialog modal-lg"><div class="modal-content">
+    <div class="modal-icon-header">
+      <div class="mih-left">
+        <div class="mih-icon"><i class="bi bi-box-seam"></i></div>
+        <div>
+          <h5 class="mih-title">Add New Item</h5>
+          <div class="mih-subtitle">Add a new item to your catalog. This item will be available in quotations and invoices.</div>
+        </div>
+      </div>
+      <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+    </div>
+    <div class="modal-body">
+      <div id="addItemError" class="alert alert-danger py-2" style="display:none"></div>
+
+      <div class="mb-3">
+        <label class="form-label">Item Name<span class="required-mark">*</span></label>
+        <div class="field-icon-wrap">
+          <i class="bi bi-box field-icon"></i>
+          <input id="newItemName" class="form-control" required placeholder="Enter item name" data-enter-action="submitNewItem()">
+        </div>
+        <div class="field-hint">e.g. Sugar Elevator Chain 66.60 MM Pitch</div>
+      </div>
+
+      <div class="mb-3 desc-field-wrap">
+        <div class="field-label-row">
+          <label class="form-label">Description<span class="required-mark">*</span></label>
+          <div class="field-actions">
+            <button type="button" class="btn btn-outline-secondary desc-bold-btn" onclick="toggleBoldSelection(this)" title="Bold the selected text">B</button>
+            <button type="button" class="btn btn-outline-secondary desc-preview-btn" onclick="toggleDescPreview(this)" title="Preview formatted text"><i class="bi bi-eye"></i> Preview</button>
+          </div>
+        </div>
+        <div class="field-icon-wrap">
+          <i class="bi bi-file-earmark-text field-icon"></i>
+          <textarea id="newItemDesc" class="form-control" rows="3" maxlength="500" required
+            placeholder="Enter item description" oninput="updateCounter(this,'newItemDesc-counter')"></textarea>
+        </div>
+        <div class="field-preview-box d-none"></div>
+        <div class="field-hint-row">
+          <div class="field-hint">You can select text and click <strong>Bold</strong> (or use **text**) to make it bold.</div>
+          <div class="field-counter" id="newItemDesc-counter">0/500</div>
+        </div>
+      </div>
+
+      <div class="mb-3">
+        <label class="form-label">Specification <span class="text-muted fw-normal">(Optional)</span></label>
+        <div class="field-icon-wrap">
+          <i class="bi bi-gear field-icon"></i>
+          <textarea id="newItemSpec" class="form-control" rows="4" maxlength="500"
+            placeholder="Enter technical specification, material, size, etc." oninput="updateCounter(this,'newItemSpec-counter')"></textarea>
+        </div>
+        <div class="field-hint-row">
+          <div class="field-hint">e.g. Material: SS304, Pitch: 66.60 MM, Breaking Load: 120 kN</div>
+          <div class="field-counter" id="newItemSpec-counter">0/500</div>
+        </div>
+      </div>
+
+      <div class="row">
+        <div class="col-md-6 mb-3">
+          <label class="form-label">Unit<span class="required-mark">*</span></label>
+          <div class="field-icon-wrap">
+            <i class="bi bi-tag field-icon"></i>
+            <input id="newItemUnit" class="form-control" list="unitOptionsQ" value="Mtr." autocomplete="off" required data-enter-action="submitNewItem()">
+          </div>
+          <datalist id="unitOptionsQ">{unit_datalist_options_q}</datalist>
+          <div class="field-hint">e.g. Mtr., Pcs., Kg., Set, Box</div>
+        </div>
+        <div class="col-md-6 mb-3">
+          <label class="form-label">Rate (Rs.)<span class="required-mark">*</span></label>
+          <div class="field-icon-wrap">
+            <i class="bi bi-currency-rupee field-icon"></i>
+            <input id="newItemRate" type="number" class="form-control" step="0.01" min="0" placeholder="Enter rate" required data-enter-action="submitNewItem()">
+          </div>
+          <div class="field-hint">Enter the selling price per unit (in INR)</div>
+        </div>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <div class="modal-footer-split">
+        <div class="info-tip-box">
+          <i class="bi bi-info-circle-fill"></i>
+          <div class="info-tip-text"><strong>Tip:</strong> Keep item details clear and accurate. These will be used in quotations and invoices.</div>
+        </div>
+        <div class="footer-actions">
+          <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+          <button type="button" class="btn btn-primary" onclick="submitNewItem()"><i class="bi bi-plus-lg"></i> Add Item</button>
+        </div>
+      </div>
     </div>
   </div></div>
 </div>
@@ -1347,6 +1776,13 @@ window.addEventListener('DOMContentLoaded', function() {{
         cat_opts = '<option value="">All Categories</option>'
         for cat in categories:
             cat_opts += f'<option value="{cat["id"]}">{esc(cat["name"])}</option>'
+        cat_opts_item = cat_opts.replace('All Categories', 'No category (optional)', 1)
+
+        common_units_q = ['Mtr.', 'Pcs.', 'Kg.', 'Set', 'Box']
+        existing_units_q = sorted({i['unit'] for i in items if i['unit']})
+        extra_units_q = [u for u in existing_units_q if u not in common_units_q]
+        unit_datalist_options_q = ''.join(
+            f'<option value="{esc(u)}">' for u in common_units_q + extra_units_q)
 
         status_opts = ''
         for s in self.QUOTATION_STATUSES:
@@ -1421,6 +1857,28 @@ function escapeHtml(s) {{
 
 function categoryLabel(item) {{
   return (item.categories && item.categories.length) ? item.categories[0].name : 'General';
+}}
+
+// Wires a hidden native <input type=date> (stacked over the calendar
+// icon) to a visible "DD - MM - YYYY" text field: opening the icon
+// shows the real date picker, and picking a date fills the text
+// field in the format the rest of the app expects.
+function wireDatePicker(pickerId, fieldId) {{
+  const picker = document.getElementById(pickerId);
+  const field = document.getElementById(fieldId);
+  if (!picker || !field) return;
+  const parts = field.value.trim().split('-').map(function(s) {{ return s.trim(); }});
+  if (parts.length === 3 && parts[0].length === 2 && parts[2].length === 4) {{
+    picker.value = parts[2] + '-' + parts[1] + '-' + parts[0];
+  }}
+  picker.addEventListener('change', function(e) {{
+    if (!e.target.value) return;
+    const d = new Date(e.target.value + 'T00:00:00');
+    const day = String(d.getDate()).padStart(2, '0');
+    const month = String(d.getMonth() + 1).padStart(2, '0');
+    const year = d.getFullYear();
+    field.value = day + ' - ' + month + ' - ' + year;
+  }});
 }}
 
 function updateStatusDot() {{
@@ -1558,8 +2016,8 @@ function submitNewCustomer() {{
   const company = document.getElementById('newCompany').value.trim();
   const err = document.getElementById('addCustError');
   err.style.display = 'none';
-  if (!contact || !company) {{
-    err.textContent = 'Contact person and company name are required.';
+  if (!company) {{
+    err.textContent = 'Company name is required.';
     err.style.display = 'block';
     return;
   }}
@@ -1568,7 +2026,8 @@ function submitNewCustomer() {{
     address: document.getElementById('newAddress').value,
     phone: document.getElementById('newPhone').value,
     email: document.getElementById('newEmail').value,
-    gstin: document.getElementById('newGstin').value
+    gstin: document.getElementById('newGstin').value,
+    status: document.getElementById('newStatus').value
   }};
   fetch('/api/customers/add', {{
     method: 'POST',
@@ -1599,6 +2058,126 @@ function submitNewCustomer() {{
     }});
 }}
 
+function toggleBoldSelection(btn) {{
+  var wrap = btn.closest('.desc-field-wrap');
+  var ta = wrap ? wrap.querySelector('textarea') : null;
+  if (!ta) return;
+  var start = ta.selectionStart, end = ta.selectionEnd;
+  if (start === end) {{
+    alert('Select the text you want to bold first.');
+    return;
+  }}
+  var val = ta.value;
+  var selected = val.slice(start, end);
+  var before = val.slice(0, start);
+  var after = val.slice(end);
+  var alreadyBold = selected.length >= 4 && selected.startsWith('**') && selected.endsWith('**');
+  var replacement = alreadyBold ? selected.slice(2, -2) : ('**' + selected + '**');
+  ta.value = before + replacement + after;
+  ta.focus();
+  ta.selectionStart = start;
+  ta.selectionEnd = start + replacement.length;
+}}
+
+function updateCounter(el, counterId) {{
+  var counter = document.getElementById(counterId);
+  if (!counter) return;
+  var max = el.getAttribute('maxlength');
+  var len = el.value.length;
+  counter.textContent = len + '/' + max;
+  counter.classList.toggle('near-limit', !!max && len > max * 0.85 && len < max);
+  counter.classList.toggle('at-limit', !!max && len >= max);
+}}
+
+function formatPreviewText(text) {{
+  var div = document.createElement('div');
+  div.textContent = text || '';
+  var escaped = div.innerHTML;
+  var formatted = escaped.replace(/\\*\\*(.+?)\\*\\*/g, '<strong>$1</strong>').replace(/\\n/g, '<br>');
+  return formatted || '<span class="text-muted">Nothing to preview yet.</span>';
+}}
+
+function toggleDescPreview(btn) {{
+  var wrap = btn.closest('.desc-field-wrap');
+  var iconWrap = wrap.querySelector('.field-icon-wrap');
+  var ta = iconWrap.querySelector('textarea');
+  var previewBox = wrap.querySelector('.field-preview-box');
+  var showing = btn.classList.toggle('active');
+  if (showing) {{
+    previewBox.innerHTML = formatPreviewText(ta.value);
+    iconWrap.classList.add('d-none');
+    previewBox.classList.remove('d-none');
+    btn.innerHTML = '<i class="bi bi-eye-slash"></i> Edit';
+  }} else {{
+    iconWrap.classList.remove('d-none');
+    previewBox.classList.add('d-none');
+    btn.innerHTML = '<i class="bi bi-eye"></i> Preview';
+  }}
+}}
+
+function submitNewItem() {{
+  const name = document.getElementById('newItemName').value.trim();
+  const desc = document.getElementById('newItemDesc').value.trim();
+  const unit = document.getElementById('newItemUnit').value.trim();
+  const rateStr = document.getElementById('newItemRate').value.trim();
+  const err = document.getElementById('addItemError');
+  err.style.display = 'none';
+  if (!name) {{
+    err.textContent = 'Item name is required.';
+    err.style.display = 'block';
+    return;
+  }}
+  if (!desc) {{
+    err.textContent = 'Description is required.';
+    err.style.display = 'block';
+    return;
+  }}
+  if (!unit) {{
+    err.textContent = 'Unit is required.';
+    err.style.display = 'block';
+    return;
+  }}
+  const rate = parseFloat(rateStr);
+  if (!rateStr || isNaN(rate) || rate < 0) {{
+    err.textContent = 'Enter a valid rate.';
+    err.style.display = 'block';
+    return;
+  }}
+  const payload = {{
+    item_name: name,
+    unit: unit,
+    rate_per_unit: rate,
+    description: document.getElementById('newItemDesc').value,
+    specification: document.getElementById('newItemSpec').value
+  }};
+  fetch('/api/items/add', {{
+    method: 'POST',
+    headers: {{'Content-Type': 'application/json'}},
+    body: JSON.stringify(payload)
+  }}).then(function(r) {{ return r.json().then(function(d) {{ return {{ok: r.ok, data: d}}; }}); }})
+    .then(function(res) {{
+      if (!res.ok || !res.data.id) throw new Error(res.data.error || 'failed');
+      allItems.push({{
+        id: res.data.id, name: res.data.name, desc: res.data.desc, spec: res.data.spec,
+        unit: res.data.unit, rate: res.data.rate, categories: res.data.categories || []
+      }});
+      refreshItemOptions();
+      document.getElementById('itemSelect').value = String(res.data.id);
+      ['newItemName','newItemRate','newItemDesc','newItemSpec'].forEach(function(id) {{
+        document.getElementById(id).value = '';
+      }});
+      document.getElementById('newItemUnit').value = 'Mtr.';
+      updateCounter(document.getElementById('newItemDesc'), 'newItemDesc-counter');
+      updateCounter(document.getElementById('newItemSpec'), 'newItemSpec-counter');
+      const modalEl = document.getElementById('addItemModal');
+      (bootstrap.Modal.getInstance(modalEl) || new bootstrap.Modal(modalEl)).hide();
+    }})
+    .catch(function(e) {{
+      err.textContent = (e && e.message) || 'Could not add item. Please try again.';
+      err.style.display = 'block';
+    }});
+}}
+
 function submitQuotationForm() {{
   if (quotationItems.length === 0) {{
     alert('Please add at least one item to the quotation.');
@@ -1611,6 +2190,8 @@ window.addEventListener('DOMContentLoaded', function() {{
   refreshItemOptions();
   renderItems();
   fillCust();
+  wireDatePicker('qeDatePicker', 'qeDateField');
+  wireDatePicker('qeEnqDatePicker', 'qeEnqDateField');
 }});
 """
 
@@ -1646,9 +2227,10 @@ window.addEventListener('DOMContentLoaded', function() {{
         </div>
         <div class="col-md-4">
           <label class="form-label">Date</label>
-          <div class="input-icon">
+          <div class="input-icon date-icon">
             <i class="bi bi-calendar3"></i>
-            <input name="date" class="form-control" value="{esc(q['date'])}" required>
+            <input type="date" class="date-icon-picker" id="qeDatePicker" tabindex="-1" aria-label="Pick a date">
+            <input name="date" id="qeDateField" class="form-control" value="{esc(q['date'])}" required>
           </div>
         </div>
         <div class="col-md-4">
@@ -1672,6 +2254,22 @@ window.addEventListener('DOMContentLoaded', function() {{
           <div class="fw-bold" id="cName"></div>
           <div id="cCompany"></div>
           <small class="text-muted" id="cAddr" style="white-space:pre-line"></small>
+        </div>
+      </div>
+      <div class="row g-3 mt-1">
+        <div class="col-md-6">
+          <label class="form-label">Customer Enquiry No. <span class="text-muted fw-normal">(optional)</span></label>
+          <input name="enquiry_no" class="form-control" id="qeEnqNo" maxlength="60" value="{esc(q['enquiry_no'] or '')}" placeholder="e.g. ENQ/2026/118">
+          <small class="text-muted" style="font-size:11px">Leave blank if the customer gave no enquiry number.</small>
+        </div>
+        <div class="col-md-6">
+          <label class="form-label">Customer Enquiry Date <span class="text-muted fw-normal">(optional)</span></label>
+          <div class="input-icon date-icon">
+            <i class="bi bi-calendar3"></i>
+            <input type="date" class="date-icon-picker" id="qeEnqDatePicker" tabindex="-1" aria-label="Pick enquiry date">
+            <input name="enquiry_date" id="qeEnqDateField" class="form-control" maxlength="30" value="{esc(q['enquiry_date'] or '')}" placeholder="DD - MM - YYYY">
+          </div>
+          <small class="text-muted" style="font-size:11px">Printed on the quotation only when an enquiry number is entered.</small>
         </div>
       </div>
     </div>
@@ -1701,12 +2299,15 @@ window.addEventListener('DOMContentLoaded', function() {{
         </div>
       </div>
       <div class="field-hint-row">
-        <small>Add items from the catalog or search directly. Enter quantity for each item and add to the list.</small>
+        <small>Add items from the catalog or search directly, or use "New Item" above to add one on the spot. Enter quantity for each item and add to the list.</small>
         <a href="/categories"><i class="bi bi-gear"></i> Manage categories</a>
       </div>
 
       <div class="add-item-box">
-        <div class="box-label">Add Item</div>
+        <div class="d-flex justify-content-between align-items-center">
+          <div class="box-label">Add Item</div>
+          <button type="button" class="btn btn-sm btn-outline-secondary" data-bs-toggle="modal" data-bs-target="#addItemModal"><i class="bi bi-plus-lg"></i> New Item</button>
+        </div>
         <div class="row g-2 align-items-end">
           <div class="col-md-7">
             <label class="form-label">Item <span style="color:var(--primary)">*</span></label>
@@ -1714,7 +2315,7 @@ window.addEventListener('DOMContentLoaded', function() {{
           </div>
           <div class="col-md-2">
             <label class="form-label">Quantity <span style="color:var(--primary)">*</span></label>
-            <input type="number" class="form-control" id="qtyInput" min="0.01" step="0.01" value="1">
+            <input type="number" class="form-control" id="qtyInput" min="0.01" step="0.01" value="1" data-enter-action="addItemRow()">
           </div>
           <div class="col-md-3">
             <button type="button" class="btn btn-primary w-100" onclick="addItemRow()"><i class="bi bi-plus-circle"></i> Add Item</button>
@@ -1766,10 +2367,11 @@ window.addEventListener('DOMContentLoaded', function() {{
           <input name="subject" class="form-control" id="subjInput" value="{esc(q['subject'] or '')}" placeholder="e.g. Sugar Elevator Chain" required>
         </div>
         <div class="col-md-6">
-          <label class="form-label">Notes (Internal)</label>
-          <textarea name="notes" class="form-control" rows="2" placeholder="Optional internal notes (not visible to customer)">{esc(q['notes'] or '')}</textarea>
+          <label class="form-label">Notes (Internal only)</label>
+          <textarea name="notes" class="form-control" rows="2" placeholder="Internal only — never printed on the quotation">{esc(q['notes'] or '')}</textarea>
         </div>
       </div>
+      {_customer_notes_block(q['customer_notes'] or '')}
       <div class="mt-3">
         <label class="form-label">Terms &amp; Conditions</label>
         <textarea name="terms" class="form-control" rows="4">{esc(q['terms'] or '')}</textarea>
@@ -1793,7 +2395,7 @@ window.addEventListener('DOMContentLoaded', function() {{
       <div class="total-line"><span>GST (18%):</span><strong id="sGst">Rs. 0</strong></div>
       <div class="grand-total-box"><span>Grand Total:</span><strong id="sGrand">Rs. 0</strong></div>
 
-      <button type="submit" class="btn btn-primary w-100 btn-lg mt-3"><i class="bi bi-file-earmark-check"></i> Update Quotation</button>
+      <button type="submit" class="btn btn-primary w-100 btn-lg mt-3" title="Save (Ctrl+S)"><i class="bi bi-file-earmark-check"></i> Update Quotation</button>
       <a href="/quotations/{qid}" class="btn btn-outline-secondary w-100 mt-2"><i class="bi bi-x-circle"></i> Cancel</a>
 
       <div class="info-box">
@@ -1816,24 +2418,125 @@ window.addEventListener('DOMContentLoaded', function() {{
     </div>
     <div class="modal-body">
       <div id="addCustError" class="alert alert-danger py-2" style="display:none"></div>
-      <div class="mb-2"><label class="form-label">Contact Person</label>
-        <input id="newContact" class="form-control" required></div>
-      <div class="mb-2"><label class="form-label">Company Name</label>
-        <input id="newCompany" class="form-control" required></div>
-      <div class="mb-2"><label class="form-label">Address</label>
-        <textarea id="newAddress" class="form-control" rows="3"></textarea></div>
       <div class="row">
-        <div class="col-6 mb-2"><label class="form-label">Phone</label>
-          <input id="newPhone" class="form-control"></div>
-        <div class="col-6 mb-2"><label class="form-label">Email</label>
-          <input id="newEmail" class="form-control"></div>
+        <div class="col-md-6 mb-2"><label class="form-label">Company Name <span class="text-danger">*</span></label>
+          <input id="newCompany" class="form-control" required data-enter-action="submitNewCustomer()"></div>
+        <div class="col-md-6 mb-2"><label class="form-label">Contact Person</label>
+          <input id="newContact" class="form-control" data-enter-action="submitNewCustomer()"></div>
       </div>
-      <div class="mb-2"><label class="form-label">GSTIN</label>
-        <input id="newGstin" class="form-control"></div>
+      <div class="mb-2"><label class="form-label">Address</label>
+        <textarea id="newAddress" class="form-control" rows="4" placeholder="e.g. STREET NO.1, ANAND NAGAR&#10;NEAR KIDZ NEST SCHOOL, MAKSUDAN&#10;JALANDHAR (PUNJAB), INDIA&#10;PIN CODE - 144008"></textarea></div>
+      <div class="row">
+        <div class="col-md-6 mb-2"><label class="form-label">Phone</label>
+          <input id="newPhone" class="form-control" data-enter-action="submitNewCustomer()"></div>
+        <div class="col-md-6 mb-2"><label class="form-label">Email</label>
+          <input id="newEmail" class="form-control" data-enter-action="submitNewCustomer()"></div>
+      </div>
+      <div class="row">
+        <div class="col-md-6 mb-2"><label class="form-label">GSTIN</label>
+          <input id="newGstin" class="form-control" data-enter-action="submitNewCustomer()"></div>
+        <div class="col-md-6 mb-2"><label class="form-label">Status</label>
+          <select id="newStatus" class="form-select">
+            <option value="active" selected>Active</option>
+            <option value="inactive">Inactive</option>
+          </select></div>
+      </div>
     </div>
     <div class="modal-footer">
       <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
       <button type="button" class="btn btn-primary" onclick="submitNewCustomer()"><i class="bi bi-plus-lg"></i> Add Customer</button>
+    </div>
+  </div></div>
+</div>
+
+<div class="modal fade" id="addItemModal" tabindex="-1">
+  <div class="modal-dialog modal-lg"><div class="modal-content">
+    <div class="modal-icon-header">
+      <div class="mih-left">
+        <div class="mih-icon"><i class="bi bi-box-seam"></i></div>
+        <div>
+          <h5 class="mih-title">Add New Item</h5>
+          <div class="mih-subtitle">Add a new item to your catalog. This item will be available in quotations and invoices.</div>
+        </div>
+      </div>
+      <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+    </div>
+    <div class="modal-body">
+      <div id="addItemError" class="alert alert-danger py-2" style="display:none"></div>
+
+      <div class="mb-3">
+        <label class="form-label">Item Name<span class="required-mark">*</span></label>
+        <div class="field-icon-wrap">
+          <i class="bi bi-box field-icon"></i>
+          <input id="newItemName" class="form-control" required placeholder="Enter item name" data-enter-action="submitNewItem()">
+        </div>
+        <div class="field-hint">e.g. Sugar Elevator Chain 66.60 MM Pitch</div>
+      </div>
+
+      <div class="mb-3 desc-field-wrap">
+        <div class="field-label-row">
+          <label class="form-label">Description<span class="required-mark">*</span></label>
+          <div class="field-actions">
+            <button type="button" class="btn btn-outline-secondary desc-bold-btn" onclick="toggleBoldSelection(this)" title="Bold the selected text">B</button>
+            <button type="button" class="btn btn-outline-secondary desc-preview-btn" onclick="toggleDescPreview(this)" title="Preview formatted text"><i class="bi bi-eye"></i> Preview</button>
+          </div>
+        </div>
+        <div class="field-icon-wrap">
+          <i class="bi bi-file-earmark-text field-icon"></i>
+          <textarea id="newItemDesc" class="form-control" rows="3" maxlength="500" required
+            placeholder="Enter item description" oninput="updateCounter(this,'newItemDesc-counter')"></textarea>
+        </div>
+        <div class="field-preview-box d-none"></div>
+        <div class="field-hint-row">
+          <div class="field-hint">You can select text and click <strong>Bold</strong> (or use **text**) to make it bold.</div>
+          <div class="field-counter" id="newItemDesc-counter">0/500</div>
+        </div>
+      </div>
+
+      <div class="mb-3">
+        <label class="form-label">Specification <span class="text-muted fw-normal">(Optional)</span></label>
+        <div class="field-icon-wrap">
+          <i class="bi bi-gear field-icon"></i>
+          <textarea id="newItemSpec" class="form-control" rows="4" maxlength="500"
+            placeholder="Enter technical specification, material, size, etc." oninput="updateCounter(this,'newItemSpec-counter')"></textarea>
+        </div>
+        <div class="field-hint-row">
+          <div class="field-hint">e.g. Material: SS304, Pitch: 66.60 MM, Breaking Load: 120 kN</div>
+          <div class="field-counter" id="newItemSpec-counter">0/500</div>
+        </div>
+      </div>
+
+      <div class="row">
+        <div class="col-md-6 mb-3">
+          <label class="form-label">Unit<span class="required-mark">*</span></label>
+          <div class="field-icon-wrap">
+            <i class="bi bi-tag field-icon"></i>
+            <input id="newItemUnit" class="form-control" list="unitOptionsQ" value="Mtr." autocomplete="off" required data-enter-action="submitNewItem()">
+          </div>
+          <datalist id="unitOptionsQ">{unit_datalist_options_q}</datalist>
+          <div class="field-hint">e.g. Mtr., Pcs., Kg., Set, Box</div>
+        </div>
+        <div class="col-md-6 mb-3">
+          <label class="form-label">Rate (Rs.)<span class="required-mark">*</span></label>
+          <div class="field-icon-wrap">
+            <i class="bi bi-currency-rupee field-icon"></i>
+            <input id="newItemRate" type="number" class="form-control" step="0.01" min="0" placeholder="Enter rate" required data-enter-action="submitNewItem()">
+          </div>
+          <div class="field-hint">Enter the selling price per unit (in INR)</div>
+        </div>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <div class="modal-footer-split">
+        <div class="info-tip-box">
+          <i class="bi bi-info-circle-fill"></i>
+          <div class="info-tip-text"><strong>Tip:</strong> Keep item details clear and accurate. These will be used in quotations and invoices.</div>
+        </div>
+        <div class="footer-actions">
+          <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+          <button type="button" class="btn btn-primary" onclick="submitNewItem()"><i class="bi bi-plus-lg"></i> Add Item</button>
+        </div>
+      </div>
     </div>
   </div></div>
 </div>
@@ -1882,6 +2585,9 @@ window.addEventListener('DOMContentLoaded', function() {{
         if not items:
             item_rows = ('<tr><td colspan="9" class="text-center text-muted py-4">'
                          'No items in this quotation.</td></tr>')
+
+        _enq = enquiry_ref_text(q['enquiry_no'], q['enquiry_date'])
+        enq_html = (' ' + esc(_enq)) if _enq else ''
 
         cName = esc(c['contact_person']) if c else ''
         cCompany = esc(c['company_name']) if c else ''
@@ -1938,7 +2644,7 @@ window.addEventListener('DOMContentLoaded', function() {{
       </div>
 
       <p>Dear Sir,</p>
-      <p>We are pleased to quote you the best rates for your inquiry for {esc(q["subject"])}. Thank you for your interest in our products.</p>
+      <p>We are pleased to quote you the best rates for your inquiry for {esc(q["subject"])}{enq_html}. Thank you for your interest in our products.</p>
 
       <table class="table table-bordered mt-3" style="font-size:12px">
         <thead style="background:#E2E8F0">
@@ -1952,6 +2658,8 @@ window.addEventListener('DOMContentLoaded', function() {{
         </thead>
         <tbody>{item_rows}</tbody>
       </table>
+
+      {('<div style="background:#FFF9DB;border:1px solid #FFD43B;padding:8px 12px;font-size:13px;margin-bottom:12px"><b>Note:</b> ' + _notes_to_html(q['customer_notes']) + '</div>') if (q['customer_notes'] or '').strip() else ''}
 
       <div class="text-end" style="font-size:13px">
         <div><b>Sub-Total: Rs. {fmt_rupee(subtotal)}</b></div>

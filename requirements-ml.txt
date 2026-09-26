@@ -1,0 +1,17 @@
+# Optional dependencies for the Business Metrics module (/metrics):
+# sales/demand forecasting, pricing suggestions, and attendance/salary
+# anomaly detection. Nothing else in this app needs these — if they
+# aren't installed, /metrics shows an install hint and every other page
+# works exactly as before.
+#
+# Install with:
+#   pip install -r requirements-ml.txt
+#
+# NOTE ON HOSTING: this app's other deployment target is shared/cPanel
+# hosting via passenger_wsgi.py (see README.md). scikit-learn (unlike
+# the TensorFlow this module used to depend on) is a small, pure
+# wheel-installable package with no GPU/CPU-build variants to worry
+# about, so it installs cleanly even on that kind of constrained,
+# shared environment.
+scikit-learn>=1.4,<2
+numpy>=1.26

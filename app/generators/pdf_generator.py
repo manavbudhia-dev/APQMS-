@@ -28,6 +28,23 @@ def _rl_multiline(text):
     return escaped.replace('\r\n', '\n').replace('\r', '\n').replace('\n', '<br/>')
 
 
+def enquiry_ref_text(enquiry_no, enquiry_date=''):
+    """Plain-text customer enquiry reference for the opening line, e.g.
+    '(Enquiry No. ABC/12) and (Enquiry Date. 12 - 09 - 2026)'.
+
+    Returns '' when there is no enquiry number — the enquiry date is only
+    ever printed alongside a number, so a lone date prints nothing.
+    Callers are responsible for escaping the result for their output."""
+    no = (enquiry_no or '').strip()
+    if not no:
+        return ''
+    text = f'(Enquiry No. {no})'
+    date = (enquiry_date or '').strip()
+    if date:
+        text += f' and (Enquiry Date. {date})'
+    return text
+
+
 def _format_notes(text):
     """Escape notes text for Paragraph markup, turn newlines into <br/>,
     and convert **word** style markers into bold <b> tags so specific
@@ -243,21 +260,24 @@ def build_pdf(quotation, customer, items, company=None):
     # ── TO (Customer) ──
     story.append(Paragraph("<b>To</b>", style_bold))
     if customer:
-        story.append(Paragraph(f"<b>{customer.get('contact_person', '')}</b>", style_bold))
-        story.append(Paragraph(f"<b>{customer.get('company_name', '')}</b>", style_bold))
+        story.append(Paragraph(f"<b>{_rl_multiline(customer.get('contact_person', ''))}</b>", style_bold))
+        story.append(Paragraph(f"<b>{_rl_multiline(customer.get('company_name', ''))}</b>", style_bold))
         story.append(Paragraph(_rl_multiline(customer.get('address', '')), style_normal))
     story.append(Spacer(1, 0.12 * inch))
 
-    # ── SUBJECT ──
-    subj = quotation.get('subject', '')
+    # ── SUBJECT ── (escaped: free-text field, must not be interpreted as
+    # ReportLab Paragraph markup)
+    subj = _rl_multiline(quotation.get('subject', ''))
     story.append(Paragraph(f"<u>Sub: Quotation for {subj}</u>", style_subject))
     story.append(Spacer(1, 0.1 * inch))
 
     # ── DEAR SIR + OPENING ──
     story.append(Paragraph("Dear Sir,", style_normal))
     story.append(Spacer(1, 0.06 * inch))
+    enq = enquiry_ref_text(quotation.get('enquiry_no'), quotation.get('enquiry_date'))
+    enq_html = f" {_rl_multiline(enq)}" if enq else ""
     story.append(Paragraph(
-        f"We are pleased to quote you the best rates for your inquiry for {subj}.",
+        f"We are pleased to quote you the best rates for your inquiry for {subj}{enq_html}.",
         style_normal
     ))
     story.append(Spacer(1, 0.18 * inch))
@@ -281,11 +301,13 @@ def build_pdf(quotation, customer, items, company=None):
         spec_text = item.get('specification', '')
         if spec_text:
             spec_lines = [ln.strip() for ln in spec_text.split('\n') if ln.strip()]
-            desc_html += "<br/><b>Specification:</b><br/>" + "<br/>".join(spec_lines)
+            desc_html += ("<br/><b>Specification:</b><br/>"
+                           + "<br/>".join(_rl_multiline(ln) for ln in spec_lines))
         desc_para = Paragraph(desc_html, item_style)
 
-        qty_para = Paragraph(f"{qty} {unit}", item_style)
-        unit_label = 'each' if unit.strip().upper().rstrip('.') == 'NOS' else f'per {unit}'
+        unit_esc = _rl_multiline(unit)
+        qty_para = Paragraph(f"{qty} {unit_esc}", item_style)
+        unit_label = 'each' if unit.strip().upper().rstrip('.') == 'NOS' else f'per {unit_esc}'
         price_para = Paragraph(
             f"@ Rs. {_indian_format(rate)}/-<br/>{unit_label}", item_style
         )
@@ -317,9 +339,10 @@ def build_pdf(quotation, customer, items, company=None):
     story.append(items_table)
     story.append(Spacer(1, 0.2 * inch))
 
-    # ── NOTES (printed if present; wrap words in **double-asterisks** to
-    #    bold/highlight just that part) ──
-    notes_text = quotation.get('notes', '')
+    # ── CUSTOMER NOTES (printed if present; **double-asterisks** = bold).
+    #    Deliberately reads `customer_notes`, never the internal `notes`
+    #    field, which must not appear on a document the customer sees. ──
+    notes_text = (quotation.get('customer_notes') or '').strip()
     if notes_text:
         notes_style = ParagraphStyle('NotesStyle', parent=styles['Normal'],
                                       fontName='Helvetica', fontSize=10, leading=13)
@@ -352,7 +375,8 @@ def build_pdf(quotation, customer, items, company=None):
                 if clean.startswith(prefix):
                     clean = clean[len(prefix):]
                     break
-            story.append(Paragraph(f"{term_num}.&nbsp;&nbsp;{clean.strip()}", style_normal))
+            clean = _rl_multiline(clean.strip())
+            story.append(Paragraph(f"{term_num}.&nbsp;&nbsp;{clean}", style_normal))
             term_num += 1
     story.append(Spacer(1, 0.25 * inch))
 

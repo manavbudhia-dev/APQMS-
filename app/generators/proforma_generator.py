@@ -242,8 +242,8 @@ def build_proforma_pdf(proforma, customer, items):
     story = []
 
     # Order No. line — date left blank for manual fill-in when not provided
-    order_no = proforma.get('order_no', '')
-    order_date = proforma.get('order_date', '')
+    order_no = _rl_multiline(proforma.get('order_no', ''))
+    order_date = _rl_multiline(proforma.get('order_date', ''))
     order_line = (
         f"<b>Order No. ____{order_no}____</b>"
     )
@@ -261,7 +261,7 @@ def build_proforma_pdf(proforma, customer, items):
     story.append(Spacer(1, 0.1 * inch))
 
     if customer:
-        company_name = customer.get('company_name', '').upper()
+        company_name = _rl_multiline(customer.get('company_name', '').upper())
         buyer_line = f"<b><u>M/s.___ {company_name}___</u></b>"
         story.append(Paragraph(buyer_line, style_customer_name))
         story.append(Spacer(1, 0.05 * inch))

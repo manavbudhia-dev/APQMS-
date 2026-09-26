@@ -6,12 +6,36 @@ basic auth-security helpers (CSRF tokens, login rate limiting).
 """
 import json
 import os
+import re
 import secrets
 import time
 import urllib.parse
 import html as _html
-from http.cookies import SimpleCookie
+from http.cookies import SimpleCookie, CookieError
 from threading import Lock
+
+
+def _atomic_write_private(path, write_fn):
+    """Write a file atomically (tmp + os.replace) with owner-only (0600)
+    permissions, since every file this is used for holds bearer-equivalent
+    secrets (session ids, CSRF tokens, failed-login counters keyed by
+    username). Default file permissions (0644) would leave them readable
+    by any other local account on a shared host — set the mode on the
+    temp file *before* any content is written, and before the atomic
+    rename makes it visible, so there's no window where the data sits
+    world-readable."""
+    tmp_path = path + '.tmp'
+    fd = os.open(tmp_path, os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o600)
+    try:
+        with os.fdopen(fd, 'w', encoding='utf-8') as f:
+            write_fn(f)
+    except BaseException:
+        try:
+            os.remove(tmp_path)
+        except OSError:
+            pass
+        raise
+    os.replace(tmp_path, path)  # atomic on POSIX
 
 
 def esc(s):
@@ -26,11 +50,37 @@ def esc_nl(s):
 
 
 def fmt_rupee(n):
-    """Format a number with Indian digit grouping."""
+    """Format a number with Indian digit grouping (lakh/crore), e.g.
+    1234567.5 -> "12,34,567.50". Python's ',' format spec groups every 3
+    digits (Western "million" style: 12,34,567 would come out as
+    1,234,567), so the grouping has to be done by hand; paise (the
+    fractional part) are kept rather than rounded away with `.0f`."""
     try:
-        return f"{float(n):,.0f}"
+        value = float(n)
     except (TypeError, ValueError):
         return "0"
+    sign = '-' if value < 0 else ''
+    value = abs(value)
+    rupees = int(value)
+    paise = round((value - rupees) * 100)
+    if paise == 100:  # rounding pushed the paise over to the next rupee
+        rupees += 1
+        paise = 0
+
+    digits = str(rupees)
+    if len(digits) > 3:
+        last3, rest = digits[-3:], digits[:-3]
+        groups = []
+        while len(rest) > 2:
+            groups.insert(0, rest[-2:])
+            rest = rest[:-2]
+        if rest:
+            groups.insert(0, rest)
+        grouped = ','.join(groups) + ',' + last3
+    else:
+        grouped = digits
+
+    return f"{sign}{grouped}.{paise:02d}"
 
 
 # Set COOKIE_SECURE=1 in the environment once the site is served over
@@ -64,17 +114,17 @@ def _load_sessions():
 
 
 def _save_sessions(sessions):
-    tmp_path = _SESSIONS_FILE + '.tmp'
-    with open(tmp_path, 'w', encoding='utf-8') as f:
-        json.dump(sessions, f)
-    os.replace(tmp_path, _SESSIONS_FILE)  # atomic on POSIX
+    _atomic_write_private(_SESSIONS_FILE, lambda f: json.dump(sessions, f))
 
 
 def get_session(cookie_header):
     if not cookie_header:
         return {}
     c = SimpleCookie()
-    c.load(cookie_header)
+    try:
+        c.load(cookie_header)
+    except CookieError:
+        return {}
     sid = c.get('sid')
     if not sid:
         return {}
@@ -102,12 +152,39 @@ def create_session(user_data):
     return sid
 
 
+def update_session(cookie_header, **fields):
+    """Patch fields onto the caller's current session in place (e.g. after
+    a profile edit changes full_name), so the sidebar/topbar reflect the
+    change immediately instead of waiting for the next login."""
+    if not cookie_header:
+        return
+    c = SimpleCookie()
+    try:
+        c.load(cookie_header)
+    except CookieError:
+        return
+    sid = c.get('sid')
+    if not sid:
+        return
+    with _lock:
+        sessions = _load_sessions()
+        data = sessions.get(sid.value)
+        if data is None:
+            return
+        data.update(fields)
+        sessions[sid.value] = data
+        _save_sessions(sessions)
+
+
 def destroy_session(cookie_header):
     """Remove a session, e.g. on explicit logout."""
     if not cookie_header:
         return
     c = SimpleCookie()
-    c.load(cookie_header)
+    try:
+        c.load(cookie_header)
+    except CookieError:
+        return
     sid = c.get('sid')
     if not sid:
         return
@@ -222,10 +299,7 @@ def _load_csrf():
 
 
 def _save_csrf(tokens):
-    tmp_path = _CSRF_FILE + '.tmp'
-    with open(tmp_path, 'w', encoding='utf-8') as f:
-        json.dump(tokens, f)
-    os.replace(tmp_path, _CSRF_FILE)
+    _atomic_write_private(_CSRF_FILE, lambda f: json.dump(tokens, f))
 
 
 def new_csrf_token():
@@ -274,10 +348,7 @@ def _load_attempts():
 
 
 def _save_attempts(attempts):
-    tmp_path = _ATTEMPTS_FILE + '.tmp'
-    with open(tmp_path, 'w', encoding='utf-8') as f:
-        json.dump(attempts, f)
-    os.replace(tmp_path, _ATTEMPTS_FILE)
+    _atomic_write_private(_ATTEMPTS_FILE, lambda f: json.dump(attempts, f))
 
 
 def _attempt_key(identifier, ip):
@@ -303,11 +374,21 @@ def is_locked_out(identifier, ip):
 
 def record_failed_login(identifier, ip):
     key = _attempt_key(identifier, ip)
+    now = time.time()
     with _attempts_lock:
         attempts = _load_attempts()
+        # Sweep every entry whose lockout window has fully elapsed since
+        # its last failure — same idea as new_csrf_token()'s sweep. This
+        # is what makes old typos decay (rather than accumulating toward
+        # MAX_LOGIN_ATTEMPTS forever) and keeps the file from growing
+        # without bound; it also means an entry can't cause an instant
+        # re-lockout just because is_locked_out() happened not to be
+        # called first to purge it.
+        attempts = {k: e for k, e in attempts.items()
+                    if now - e.get('last', 0) < LOCKOUT_SECONDS}
         entry = attempts.get(key, {'count': 0, 'last': 0})
         entry['count'] += 1
-        entry['last'] = time.time()
+        entry['last'] = now
         attempts[key] = entry
         _save_attempts(attempts)
 
@@ -319,6 +400,97 @@ def clear_failed_logins(identifier, ip):
         if key in attempts:
             attempts.pop(key, None)
             _save_attempts(attempts)
+
+
+# ── CROSS-SITE REQUEST FORGERY: ORIGIN/REFERER CHECK ──
+# Complements (does not replace) the per-form CSRF tokens already used on
+# the most sensitive forms (login, register, change-password, backup/
+# restore, profile update) and the session cookie's SameSite=Lax flag,
+# which already stops it riding along on a cross-site POST in any modern
+# browser. Checking Origin/Referer closes the rest: every other
+# state-changing POST route in the app (customers/items/quotations/
+# proforma/packing/salary/user-management CRUD) — without having to
+# thread a token through every one of those forms individually, and
+# without a gap opening up the next time a new POST route is added,
+# since this runs once, centrally, for every POST request.
+def is_same_origin(headers, request_path=''):
+    """True if this POST request's Origin/Referer (when present) names
+    this same site. A real cross-site page cannot spoof Origin — it's one
+    of the handful of headers browsers set themselves and refuse to let
+    script override — so a mismatch here is a reliable sign of a forged
+    cross-site submission. Neither header is sent by every possible
+    client (some non-browser tools, very old browsers), so their total
+    absence is allowed through rather than blocked, relying on
+    SameSite=Lax as the backstop for that slice of traffic."""
+    host_candidates = {h.strip().lower() for h in (
+        headers.get('Host', ''),
+        # X-Forwarded-Host can be a comma-separated list, one entry per
+        # proxy hop (each hop appends the host it was asked for) — take
+        # every entry as a candidate rather than treating the whole,
+        # unsplit string as a single (never-matching) host.
+        *headers.get('X-Forwarded-Host', '').split(','),
+    ) if h.strip()}
+    if not host_candidates:
+        return True  # nothing to compare against (unusual; don't false-positive)
+
+    origin = headers.get('Origin')
+    if origin:
+        try:
+            netloc = urllib.parse.urlparse(origin).netloc.lower()
+        except ValueError:
+            return False
+        return netloc in host_candidates
+
+    referer = headers.get('Referer')
+    if referer:
+        try:
+            netloc = urllib.parse.urlparse(referer).netloc.lower()
+        except ValueError:
+            return False
+        return netloc in host_candidates
+
+    return True
+
+
+# ── SECURITY RESPONSE HEADERS ──
+# Applied to every response (see BaseMixin.send / serve_static). None of
+# these depend on request content, so they're safe defaults everywhere:
+#   X-Content-Type-Options   stops the browser "sniffing" a response into
+#                             a different content type than declared
+#                             (relevant since some responses are
+#                             user-influenced HTML/JSON/PDF).
+#   X-Frame-Options /
+#   frame-ancestors           this app has no legitimate reason to be
+#                             framed by another site — blocks clickjacking.
+#   Referrer-Policy           don't leak full internal URLs (which can
+#                             contain search terms, ids) to third-party
+#                             link targets.
+#   Permissions-Policy        opt this origin out of powerful browser
+#                             features it never uses.
+#   Cache-Control             authenticated pages shouldn't be cached by
+#                             shared/browser caches after logout.
+SECURITY_HEADERS = [
+    ('X-Content-Type-Options', 'nosniff'),
+    ('X-Frame-Options', 'DENY'),
+    ('Referrer-Policy', 'same-origin'),
+    ('Permissions-Policy', 'geolocation=(), camera=(), microphone=()'),
+    # 'unsafe-inline' on script/style is a pragmatic concession, not an
+    # oversight: the UI relies throughout on inline <script> blocks and
+    # onclick="..." handlers, and rewriting that to a nonce/hash-based
+    # CSP is a front-end restructuring project of its own. Escaping user
+    # data before it reaches HTML (see esc()/_layout()) is what actually
+    # stops XSS; CSP here still earns its keep by blocking object/embed
+    # content, framing, and any script/style/font source other than this
+    # origin and the two CDNs the app already uses.
+    ('Content-Security-Policy',
+     "default-src 'self'; base-uri 'self'; frame-ancestors 'none'; "
+     "form-action 'self'; object-src 'none'; img-src 'self' data:; "
+     "style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; "
+     "script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; "
+     "font-src 'self' https://cdn.jsdelivr.net"),
+]
+
+NO_STORE_HEADERS = [('Cache-Control', 'no-store')]
 
 
 # ── REQUEST PARSER ──
@@ -341,13 +513,38 @@ def parse_form(body, content_type):
     if 'application/json' in content_type:
         if body:
             try:
-                return FormData(json.loads(body))
+                parsed = json.loads(body)
             except Exception:
                 return FormData()
+            # A JSON array (including one of 2-element arrays, which
+            # dict()/FormData() would otherwise happily accept as
+            # key/value pairs) is not a form and must be rejected rather
+            # than silently turned into an unintended mapping.
+            if not isinstance(parsed, dict):
+                return FormData()
+            return FormData(parsed)
         return FormData()
     if 'application/x-www-form-urlencoded' in content_type:
+        # parse_qsl() on a bytes body returns bytes keys/values (e.g.
+        # {b'field': b'val'}), which silently break every str-keyed
+        # form.get('field') lookup elsewhere in the app. Decode to str
+        # first so callers get the str-keyed dict they expect regardless
+        # of whether the caller passed bytes or str.
+        if isinstance(body, (bytes, bytearray)):
+            body = body.decode('utf-8', errors='replace')
         fd = FormData()
-        for k, v in urllib.parse.parse_qsl(body):
+        # keep_blank_values=True is required here: proforma/quotation/
+        # packing item rows are submitted as several parallel arrays
+        # (item_id[], item_name[], description[], ...) that are zipped
+        # together by position server-side. A blank value (e.g. a manually
+        # entered item with no catalog item_id, or an item with no
+        # description) is a legitimate, meaningful empty string for that
+        # row — not "field absent". The default keep_blank_values=False
+        # would silently drop just that one key/value pair, shortening
+        # only that array and desyncing every row's fields from each
+        # other (an item's rate ending up paired with the next item's
+        # name, etc.) without raising any error.
+        for k, v in urllib.parse.parse_qsl(body, keep_blank_values=True):
             if k in fd:
                 existing = fd[k]
                 if isinstance(existing, list):
@@ -358,6 +555,95 @@ def parse_form(body, content_type):
                 fd[k] = v
         return fd
     return FormData()
+
+
+class UploadedFile:
+    """One file part of a multipart/form-data submission — the raw bytes
+    exactly as uploaded (never decoded as text), plus the filename and
+    content-type the browser sent. Used for anything binary, e.g.
+    restoring a database backup."""
+
+    def __init__(self, filename, content_type, data):
+        self.filename = filename
+        self.content_type = content_type
+        self.data = data
+
+    def __repr__(self):
+        return f"UploadedFile(filename={self.filename!r}, {len(self.data)} bytes)"
+
+
+_MULTIPART_BOUNDARY_RE = re.compile(r'boundary=(?:"([^"]+)"|([^;]+))')
+_MULTIPART_NAME_RE = re.compile(r'\bname="([^"]*)"')
+_MULTIPART_FILENAME_RE = re.compile(r'\bfilename="([^"]*)"')
+
+
+def parse_multipart(body, content_type):
+    """Parse a multipart/form-data body (raw bytes — must NOT be decoded
+    as text first, since file parts can be arbitrary binary). Text fields
+    come back as plain strings; file fields come back as UploadedFile
+    instances so their bytes are never mangled by a text decode/re-encode
+    round-trip."""
+    fd = FormData()
+    m = _MULTIPART_BOUNDARY_RE.search(content_type or '')
+    if not m or not isinstance(body, (bytes, bytearray)):
+        return fd
+    boundary = (m.group(1) or m.group(2)).strip()
+    delimiter = ('--' + boundary).encode('latin-1')
+
+    for raw_part in body.split(delimiter):
+        part = raw_part
+        if part in (b'', b'--') or part.startswith(b'--'):
+            continue
+        # Each part begins with the CRLF that immediately follows the
+        # boundary delimiter. Strip exactly that one leading CRLF — not
+        # part.strip(b'\r\n'), which removes *every* trailing \r/\n byte
+        # and will truncate binary content (e.g. a .db.enc backup's last
+        # bytes happening to be 0x0d/0x0a) as well as double-strip the
+        # trailing CRLF handled below.
+        if part.startswith(b'\r\n'):
+            part = part[2:]
+        if b'\r\n\r\n' not in part:
+            continue
+        header_blob, content = part.split(b'\r\n\r\n', 1)
+        # Trailing CRLF before the next boundary delimiter is part of the
+        # delimiter, not the field's content.
+        if content.endswith(b'\r\n'):
+            content = content[:-2]
+
+        headers = {}
+        for line in header_blob.split(b'\r\n'):
+            if b':' in line:
+                k, v = line.split(b':', 1)
+                headers[k.strip().lower().decode('latin-1')] = v.strip().decode('latin-1')
+
+        disp = headers.get('content-disposition', '')
+        name_m = _MULTIPART_NAME_RE.search(disp)
+        if not name_m:
+            continue
+        field_name = name_m.group(1)
+
+        filename_m = _MULTIPART_FILENAME_RE.search(disp)
+        if filename_m is not None:
+            value = UploadedFile(
+                filename=filename_m.group(1),
+                content_type=headers.get('content-type', 'application/octet-stream'),
+                data=bytes(content))
+        else:
+            value = content.decode('utf-8', errors='replace')
+
+        # Repeated field names (e.g. item_id[], item_name[] parallel-array
+        # rows, same as the urlencoded case in parse_form()) must collect
+        # into a list rather than the last one silently overwriting all
+        # the others.
+        if field_name in fd:
+            existing = fd[field_name]
+            if isinstance(existing, list):
+                existing.append(value)
+            else:
+                fd[field_name] = [existing, value]
+        else:
+            fd[field_name] = value
+    return fd
 
 
 # ── RESPONSE HELPERS ──
@@ -374,7 +660,26 @@ def html_response(body, status=200):
         ('Content-Type', 'text/html; charset=utf-8')]
 
 
+def _content_disposition(filename):
+    """Build a safe `attachment; filename="..."` value. Strips CR/LF (which
+    could otherwise inject additional header lines/values) and escapes
+    embedded double quotes/backslashes, so a dynamic filename containing
+    `"`, `\r`, or `\n` can't break out of the quoted-string or corrupt the
+    header."""
+    safe = (filename or '').replace('\r', '').replace('\n', '')
+    safe = safe.replace('\\', '\\\\').replace('"', '\\"')
+    return f'attachment; filename="{safe}"'
+
+
 def pdf_response(data, filename):
     return data, 200, [
         ('Content-Type', 'application/pdf'),
-        ('Content-Disposition', f'attachment; filename="{filename}"')]
+        ('Content-Disposition', _content_disposition(filename))]
+
+
+def file_response(data, filename, content_type='application/octet-stream'):
+    """Generic downloadable-file response (backups, data exports, etc.) —
+    same shape as pdf_response but for any content type."""
+    return data, 200, [
+        ('Content-Type', content_type),
+        ('Content-Disposition', _content_disposition(filename))]

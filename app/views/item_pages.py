@@ -5,6 +5,7 @@ from utils.http_utils import esc
 from utils.http_utils import esc_nl
 from utils.http_utils import fmt_rupee
 from utils.http_utils import redirect
+from utils.http_utils import json_response
 from database import get_db
 
 # Matches **bold text** so it can be rendered as <strong> wherever a
@@ -106,6 +107,69 @@ class ItemPagesMixin:
         return self.send(*redirect('/items'))
 
 
+    def handle_item_add_json(self, form):
+        """AJAX twin of handle_item_add: used by the inline "+ New Item"
+        modal on the quotation/proforma item picker so an item can be
+        created (optionally tagged with a category) without losing
+        whatever the user was already filling in. Returns the new row,
+        including its category if one was set, as JSON instead of
+        redirecting."""
+        item_name = form.get('item_name', '').strip()
+        if not item_name:
+            return self.send(*json_response({'error': 'Item name is required.'}, 400))
+        try:
+            rate = float(form.get('rate_per_unit', 0))
+        except (TypeError, ValueError):
+            rate = None
+        if rate is None or rate < 0:
+            return self.send(*json_response({'error': 'Enter a valid rate.'}, 400))
+        description = form.get('description', '').replace('\r\n', '\n').replace('\r', '\n').strip()
+        specification = form.get('specification', '').replace('\r\n', '\n').replace('\r', '\n').strip()
+        unit = form.get('unit', '').strip() or 'Mtr.'
+
+        db = get_db()
+        cur = db.execute(
+            "INSERT INTO items (item_name,description,specification,unit,rate_per_unit) "
+            "VALUES (?,?,?,?,?)",
+            (item_name, description, specification, unit, rate))
+        new_id = cur.lastrowid
+
+        # Optional category, same as the "Add Category" flow: either an
+        # existing category id, or a brand-new name typed on the spot
+        # (created if it doesn't already exist). At most one either way.
+        cat_row = None
+        new_category_name = form.get('new_category_name', '').strip()
+        category_id = form.get('category_id', '').strip()
+        if new_category_name:
+            db.execute("INSERT OR IGNORE INTO categories (name) VALUES (?)", (new_category_name,))
+            cat_row = db.execute(
+                "SELECT * FROM categories WHERE name=?", (new_category_name,)).fetchone()
+        elif category_id:
+            try:
+                cat_row = db.execute(
+                    "SELECT * FROM categories WHERE id=?", (int(category_id),)).fetchone()
+            except (TypeError, ValueError):
+                cat_row = None
+        categories = []
+        if cat_row:
+            db.execute(
+                "INSERT OR IGNORE INTO item_categories (category_id, item_id) VALUES (?,?)",
+                (cat_row['id'], new_id))
+            categories.append({'id': cat_row['id'], 'name': cat_row['name']})
+
+        db.commit()
+        db.close()
+        return self.send(*json_response({
+            'id': new_id,
+            'name': item_name,
+            'desc': description,
+            'spec': specification,
+            'unit': unit,
+            'rate': rate,
+            'categories': categories,
+        }))
+
+
     def handle_item_edit(self, iid, form):
         try:
             rate = float(form.get('rate_per_unit', 0))
@@ -191,7 +255,7 @@ class ItemPagesMixin:
       </div>
       <div class="modal-footer">
         <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
-        <button class="btn btn-primary"><i class="bi bi-check-lg"></i> Save</button>
+        <button class="btn btn-primary" title="Save (Ctrl+S)"><i class="bi bi-check-lg"></i> Save</button>
       </div>
     </form>
   </div></div>
@@ -393,6 +457,11 @@ class ItemPagesMixin:
             f'<option value="{sz}"{" selected" if sz == frag["page_size"] else ""}>{sz} / page</option>'
             for sz in self.ITEMS_PAGE_SIZES)
 
+        common_units = ['Mtr.', 'Pcs.', 'Kg.', 'Set', 'Box']
+        extra_units = [u for u in frag['all_units'] if u not in common_units]
+        unit_datalist_options = ''.join(
+            f'<option value="{esc(u)}">' for u in common_units + extra_units)
+
         content = f'''
 <style>
 .catalog-header {{ display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:16px; margin-bottom:20px; }}
@@ -593,33 +662,90 @@ class ItemPagesMixin:
 <div class="modal fade" id="addItem" tabindex="-1">
   <div class="modal-dialog modal-lg"><div class="modal-content">
     <form method="POST" action="/items/add">
-      <div class="modal-header"><h5 class="modal-title">Add Item</h5>
-        <button type="button" class="btn-close" data-bs-dismiss="modal"></button></div>
-      <div class="modal-body">
-        <div class="mb-2"><label class="form-label">Item Name</label>
-          <input name="item_name" class="form-control" required></div>
-        <div class="mb-2 desc-field-wrap">
-          <div class="d-flex justify-content-between align-items-center">
-            <label class="form-label mb-1">Description</label>
-            <button type="button" class="btn btn-sm btn-outline-secondary desc-bold-btn" onclick="toggleBoldSelection(this)" title="Bold the selected text">
-              <i class="bi bi-type-bold"></i> Bold
-            </button>
+      <div class="modal-icon-header">
+        <div class="mih-left">
+          <div class="mih-icon"><i class="bi bi-box-seam"></i></div>
+          <div>
+            <h5 class="mih-title">Add Item</h5>
+            <div class="mih-subtitle">Add a new item to your catalog. This item will be available in quotations and invoices.</div>
           </div>
-          <textarea name="description" id="desc-add" class="form-control" rows="3" placeholder="e.g. Sugar Elevator Chain 66.60 MM Pitch&#10;Heavy duty, for wet/abrasive conditions"></textarea>
-          <div class="form-text">Select text, then click Bold (or wrap it yourself in **like this**) to show it in bold.</div>
         </div>
-        <div class="mb-2"><label class="form-label">Specification</label>
-          <textarea name="specification" class="form-control" rows="4"></textarea></div>
+        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+      </div>
+      <div class="modal-body">
+        <div class="mb-3">
+          <label class="form-label">Item Name<span class="required-mark">*</span></label>
+          <div class="field-icon-wrap">
+            <i class="bi bi-box field-icon"></i>
+            <input name="item_name" class="form-control" required placeholder="Enter item name">
+          </div>
+          <div class="field-hint">e.g. Sugar Elevator Chain 66.60 MM Pitch</div>
+        </div>
+
+        <div class="mb-3 desc-field-wrap">
+          <div class="field-label-row">
+            <label class="form-label">Description<span class="required-mark">*</span></label>
+            <div class="field-actions">
+              <button type="button" class="btn btn-outline-secondary desc-bold-btn" onclick="toggleBoldSelection(this)" title="Bold the selected text">B</button>
+              <button type="button" class="btn btn-outline-secondary desc-preview-btn" onclick="toggleDescPreview(this)" title="Preview formatted text"><i class="bi bi-eye"></i> Preview</button>
+            </div>
+          </div>
+          <div class="field-icon-wrap">
+            <i class="bi bi-file-earmark-text field-icon"></i>
+            <textarea name="description" id="desc-add" class="form-control" rows="3" maxlength="500" required
+              placeholder="Enter item description" oninput="updateCounter(this,'desc-add-counter')"></textarea>
+          </div>
+          <div class="field-preview-box d-none" id="desc-add-preview"></div>
+          <div class="field-hint-row">
+            <div class="field-hint">You can select text and click <strong>Bold</strong> (or use **text**) to make it bold.</div>
+            <div class="field-counter" id="desc-add-counter">0/500</div>
+          </div>
+        </div>
+
+        <div class="mb-3">
+          <label class="form-label">Specification <span class="text-muted fw-normal">(Optional)</span></label>
+          <div class="field-icon-wrap">
+            <i class="bi bi-gear field-icon"></i>
+            <textarea name="specification" class="form-control" rows="4" maxlength="500"
+              placeholder="Enter technical specification, material, size, etc." oninput="updateCounter(this,'spec-add-counter')"></textarea>
+          </div>
+          <div class="field-hint-row">
+            <div class="field-hint">e.g. Material: SS304, Pitch: 66.60 MM, Breaking Load: 120 kN</div>
+            <div class="field-counter" id="spec-add-counter">0/500</div>
+          </div>
+        </div>
+
         <div class="row">
-          <div class="col-6 mb-2"><label class="form-label">Unit</label>
-            <input name="unit" class="form-control" value="Mtr."></div>
-          <div class="col-6 mb-2"><label class="form-label">Rate (Rs.)</label>
-            <input name="rate_per_unit" type="number" class="form-control" step="0.01" required></div>
+          <div class="col-md-6 mb-3">
+            <label class="form-label">Unit<span class="required-mark">*</span></label>
+            <div class="field-icon-wrap">
+              <i class="bi bi-tag field-icon"></i>
+              <input name="unit" class="form-control" list="unitOptions" value="Mtr." autocomplete="off" required>
+            </div>
+            <datalist id="unitOptions">{unit_datalist_options}</datalist>
+            <div class="field-hint">e.g. Mtr., Pcs., Kg., Set, Box</div>
+          </div>
+          <div class="col-md-6 mb-3">
+            <label class="form-label">Rate (Rs.)<span class="required-mark">*</span></label>
+            <div class="field-icon-wrap">
+              <i class="bi bi-currency-rupee field-icon"></i>
+              <input name="rate_per_unit" type="number" class="form-control" step="0.01" min="0" placeholder="Enter rate" required>
+            </div>
+            <div class="field-hint">Enter the selling price per unit (in INR)</div>
+          </div>
         </div>
       </div>
       <div class="modal-footer">
-        <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
-        <button class="btn btn-primary"><i class="bi bi-plus-lg"></i> Add</button>
+        <div class="modal-footer-split">
+          <div class="info-tip-box">
+            <i class="bi bi-info-circle-fill"></i>
+            <div class="info-tip-text"><strong>Tip:</strong> Keep item details clear and accurate. These will be used in quotations and invoices.</div>
+          </div>
+          <div class="footer-actions">
+            <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+            <button class="btn btn-primary" title="Save (Ctrl+S)"><i class="bi bi-plus-lg"></i> Add Item</button>
+          </div>
+        </div>
       </div>
     </form>
   </div></div>
@@ -645,6 +771,42 @@ function toggleBoldSelection(btn) {{
   ta.focus();
   ta.selectionStart = start;
   ta.selectionEnd = start + replacement.length;
+}}
+
+function updateCounter(el, counterId) {{
+  var counter = document.getElementById(counterId);
+  if (!counter) return;
+  var max = el.getAttribute('maxlength');
+  var len = el.value.length;
+  counter.textContent = len + '/' + max;
+  counter.classList.toggle('near-limit', !!max && len > max * 0.85 && len < max);
+  counter.classList.toggle('at-limit', !!max && len >= max);
+}}
+
+function formatPreviewText(text) {{
+  var div = document.createElement('div');
+  div.textContent = text || '';
+  var escaped = div.innerHTML;
+  var formatted = escaped.replace(/\\*\\*(.+?)\\*\\*/g, '<strong>$1</strong>').replace(/\\n/g, '<br>');
+  return formatted || '<span class="text-muted">Nothing to preview yet.</span>';
+}}
+
+function toggleDescPreview(btn) {{
+  var wrap = btn.closest('.desc-field-wrap');
+  var iconWrap = wrap.querySelector('.field-icon-wrap');
+  var ta = iconWrap.querySelector('textarea');
+  var previewBox = wrap.querySelector('.field-preview-box');
+  var showing = btn.classList.toggle('active');
+  if (showing) {{
+    previewBox.innerHTML = formatPreviewText(ta.value);
+    iconWrap.classList.add('d-none');
+    previewBox.classList.remove('d-none');
+    btn.innerHTML = '<i class="bi bi-eye-slash"></i> Edit';
+  }} else {{
+    iconWrap.classList.remove('d-none');
+    previewBox.classList.add('d-none');
+    btn.innerHTML = '<i class="bi bi-eye"></i> Preview';
+  }}
 }}
 
 (function() {{

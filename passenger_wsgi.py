@@ -93,8 +93,17 @@ def application(environ, start_response):
         else:
             handler.send(b'Method Not Allowed', 405, [('Content-Type', 'text/plain')])
     except Exception:
+        # do_GET/do_POST (see app/routing.py) already catch and log
+        # anything an individual page handler raises, so reaching this
+        # branch means the failure happened outside that — e.g. while
+        # building the WSGI environ itself. Either way, a raw traceback
+        # must never go to the client: it hands out file paths, request
+        # data, and internal structure to whoever triggered the error,
+        # authenticated or not. Log it server-side (visible in the
+        # Passenger/cPanel error log) and send back a generic message.
         import traceback
-        err = traceback.format_exc().encode()
+        traceback.print_exc(file=sys.stderr)
+        err = b'Internal Server Error. Please try again or contact an administrator.'
         handler._wsgi_status = '500 Internal Server Error'
         handler._wsgi_headers = [('Content-Type', 'text/plain; charset=utf-8')]
         handler.wfile = io.BytesIO(err)

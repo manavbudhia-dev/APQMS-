@@ -73,7 +73,7 @@ class CategoryPagesMixin:
       </div>
       <div class="modal-footer">
         <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
-        <button class="btn btn-primary"><i class="bi bi-check-lg"></i> Save</button>
+        <button class="btn btn-primary" title="Save (Ctrl+S)"><i class="bi bi-check-lg"></i> Save</button>
       </div>
     </form>
   </div></div>
@@ -122,7 +122,7 @@ class CategoryPagesMixin:
       </div>
       <div class="modal-footer">
         <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
-        <button class="btn btn-primary"><i class="bi bi-plus-lg"></i> Add</button>
+        <button class="btn btn-primary" title="Save (Ctrl+S)"><i class="bi bi-plus-lg"></i> Add</button>
       </div>
     </form>
   </div></div>
@@ -163,7 +163,7 @@ class CategoryPagesMixin:
   </table>
 </div>
 <div class="mt-3">
-  <button type="submit" class="btn btn-primary"><i class="bi bi-check-circle"></i> Save Items</button>
+  <button type="submit" class="btn btn-primary" title="Save (Ctrl+S)"><i class="bi bi-check-circle"></i> Save Items</button>
 </div>
 </form>'''
         return self._layout(f'Items - {category["name"]}', f'Items in {category["name"]}', content, 'items')

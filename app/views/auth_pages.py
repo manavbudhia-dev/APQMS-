@@ -200,7 +200,7 @@ class AuthPagesMixin:
         <label class="form-label">Password</label>
         <input name="password" type="password" class="form-control" required placeholder="Enter your password" maxlength="128" autocomplete="current-password">
       </div>
-      <button class="btn btn-primary w-100 mb-3"><i class="bi bi-box-arrow-in-right"></i> Sign In</button>
+      <button class="btn btn-primary w-100 mb-3" title="Sign in (Ctrl+S / Enter)"><i class="bi bi-box-arrow-in-right"></i> Sign In</button>
     </form>
   </div>
 </div>
@@ -268,7 +268,7 @@ class AuthPagesMixin:
           <option value="admin">Admin (can also create accounts)</option>
         </select>
       </div>
-      <button class="btn btn-primary w-100 mb-3"><i class="bi bi-person-plus"></i> Create Account</button>
+      <button class="btn btn-primary w-100 mb-3" title="Save (Ctrl+S)"><i class="bi bi-person-plus"></i> Create Account</button>
     </form>
     <div class="text-center">
       <a href="/dashboard" style="color:#DC2626;text-decoration:none;font-weight:500">&larr; Back to Dashboard</a>
@@ -335,7 +335,7 @@ function generatePassword() {{
         <label class="form-label">Confirm New Password</label>
         <input name="confirm_password" type="password" class="form-control" required maxlength="128" autocomplete="new-password">
       </div>
-      <button class="btn btn-primary w-100 mb-3"><i class="bi bi-key"></i> Update Password</button>
+      <button class="btn btn-primary w-100 mb-3" title="Save (Ctrl+S)"><i class="bi bi-key"></i> Update Password</button>
     </form>
     <div class="text-center">
       <a href="/dashboard" style="color:#DC2626;text-decoration:none;font-weight:500">&larr; Back to Dashboard</a>
