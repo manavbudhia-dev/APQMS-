@@ -1,16 +1,110 @@
 """SQLite database models and initialization for Aypee Quotation System."""
-import sqlite3, os, sys, hashlib, secrets
+import sqlite3, os, sys, hashlib, secrets, random, time, threading
 from datetime import datetime
 from utils.dates import fy_bounds, fy_start_year
 
 DB_PATH = os.environ.get('QUOTATION_DB', os.path.join(os.path.dirname(os.path.abspath(__file__)), 'quotation.db'))
 
+# SQLite allows only one writer at a time. Every handler in this app opens
+# its own connection per request and ThreadingHTTPServer serves requests
+# concurrently, so waiting for the write lock is the normal case, not an
+# edge case. The 5s driver default was measured to be too short under a
+# dozen concurrent saves — requests failed with "database is locked" and
+# surfaced as 500s with nothing written.
+BUSY_TIMEOUT_MS = 30_000
+
+# How many connections this process currently has open to DB_PATH. The
+# restore handler needs this: replacing the file under a connection that is
+# still using it does not raise anything, it just quietly redirects that
+# connection's writes to the now-unlinked old inode, so the save vanishes.
+_open_conns = 0
+_open_conns_lock = threading.Lock()
+
+
+class _TrackedConnection(sqlite3.Connection):
+    """A connection that keeps the count above accurate. Closing is the
+    only way the count goes down, so a handler that abandons one without
+    closing it shows up here as a permanently busy database — which is the
+    honest answer, and is reported to the admin instead of a restore
+    proceeding and losing data."""
+    _counted = False
+
+    def close(self):
+        if self._counted:
+            self._counted = False
+            global _open_conns
+            with _open_conns_lock:
+                _open_conns -= 1
+        super().close()
+
+
+def count_open_connections():
+    with _open_conns_lock:
+        return _open_conns
+
+
+def wait_for_connections_to_close(timeout=5.0, interval=0.02):
+    """Block until this process has no open connection to DB_PATH, or
+    `timeout` passes. Returns True only if it actually reached zero."""
+    deadline = time.monotonic() + timeout
+    while True:
+        if count_open_connections() == 0:
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(interval)
+
+
 def get_db():
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA foreign_keys=ON")
+    global _open_conns
+    conn = sqlite3.connect(DB_PATH, timeout=BUSY_TIMEOUT_MS / 1000.0,
+                           factory=_TrackedConnection)
+    try:
+        conn.row_factory = sqlite3.Row
+        # `timeout=` above only covers the driver's own wait; PRAGMAs and some
+        # lock-upgrade paths consult the connection's busy handler instead, so
+        # set it explicitly too and keep the two in step.
+        conn.execute(f"PRAGMA busy_timeout={BUSY_TIMEOUT_MS}")
+        # WAL is a persistent property of the database file, so this only needs
+        # to happen once. Issuing it on every connection made each request try
+        # to take a lock it did not need, which is how a page *view* ended up
+        # contending with an unrelated save. Check first (a read, no lock) and
+        # only switch when the file isn't already in WAL.
+        if (conn.execute("PRAGMA journal_mode").fetchone()[0] or '').lower() != 'wal':
+            conn.execute("PRAGMA journal_mode=WAL")
+        # The documented pairing with WAL: full durability for the committed
+        # WAL, without an fsync on every commit. This is what keeps a burst of
+        # concurrent writers from queueing on disk.
+        conn.execute("PRAGMA synchronous=NORMAL")
+        conn.execute("PRAGMA foreign_keys=ON")
+    except BaseException:
+        conn.close()
+        raise
+    with _open_conns_lock:
+        _open_conns += 1
+    conn._counted = True
     return conn
+
+def begin_immediate(conn):
+    """Take the write lock *before* reading, for any read-then-write
+    sequence. Returns True when this call opened the transaction, False
+    when one was already open (the caller owns it, and already holds the
+    write lock if it has written anything).
+
+    Python's sqlite3 leaves a transaction deferred, so a SELECT followed
+    by an INSERT first takes a read lock and then tries to upgrade it. An
+    upgrade that can't be granted returns SQLITE_BUSY immediately and does
+    *not* wait out busy_timeout — retrying would deadlock against the
+    other connection doing the same upgrade. Every document-number
+    generator in this module is exactly that shape (SELECT MAX(...) then
+    INSERT), which is why they must run inside an IMMEDIATE transaction:
+    the write lock is held from the start, the read sees every committed
+    number, and concurrent callers queue instead of failing.
+    """
+    if conn.in_transaction:
+        return False
+    conn.execute("BEGIN IMMEDIATE")
+    return True
 
 # ── PASSWORD HASHING ──
 # PBKDF2-HMAC-SHA256 with a high iteration count. Much more resistant to
@@ -459,6 +553,15 @@ def get_or_create_financial_year(conn, start_year):
     "create financial year" request), and return its row. Does not close
     `conn`; the caller owns that."""
     start, end, label = fy_bounds(start_year)
+    # Look before writing. This function is reached from resolve_financial_year,
+    # which every page render calls through _current_fy()/_fy_switcher_html() —
+    # so an unconditional INSERT OR IGNORE turned each page *view* into a write
+    # transaction, queueing read-only traffic behind SQLite's single write lock
+    # and causing unrelated saves to time out with "database is locked".
+    row = conn.execute(
+        "SELECT * FROM financial_years WHERE start_year=?", (start_year,)).fetchone()
+    if row:
+        return row
     conn.execute(
         "INSERT OR IGNORE INTO financial_years (start_year, label, start_date, end_date) "
         "VALUES (?, ?, ?, ?)", (start_year, label, start, end))
@@ -511,6 +614,67 @@ def gen_packing_list_no(conn):
         (len(prefix) + 1, f"{prefix}%")).fetchone()
     num = (row[0] or 0) + 1
     return f"{prefix}{num:03d}"
+
+
+class DocumentNumberConflictError(RuntimeError):
+    """A unique document number could not be generated after every retry.
+
+    Raised instead of letting the underlying sqlite3 error escape, so a
+    caller can show "someone else was creating a document at the same
+    moment, nothing was saved" rather than a generic 500.
+    """
+
+
+def insert_with_generated_no(conn, insert_sql, no_fn, values_fn, max_attempts=5):
+    """Generate a unique document number and INSERT with it, atomically.
+
+    no_fn() returns a candidate number; values_fn(no) returns the full
+    parameter tuple for insert_sql. Returns (lastrowid, number).
+
+    The number is derived from MAX() over the table, so two concurrent
+    requests that both read before either writes get the *same* number and
+    one of them violates the UNIQUE constraint. Running the read and the
+    INSERT in one IMMEDIATE transaction is what actually closes that: the
+    write lock is held from before the read, so no other writer can slip a
+    competing number in between. The retry loop is a backstop for the case
+    where the caller already had a transaction open (and so already held
+    the lock) plus a genuinely contended write.
+
+    On success the transaction is left OPEN, so the caller can keep adding
+    child rows (line items) and commit the whole document as one unit —
+    which is what lets it roll everything back if a later step fails.
+    """
+    last_err = None
+    for attempt in range(max_attempts):
+        owns_txn = begin_immediate(conn)
+        try:
+            number = no_fn()
+            cur = conn.execute(insert_sql, values_fn(number))
+            return cur.lastrowid, number
+        except sqlite3.IntegrityError as e:
+            last_err = e
+        except sqlite3.OperationalError as e:
+            msg = str(e).lower()
+            if 'locked' not in msg and 'busy' not in msg:
+                raise
+            last_err = e
+        if owns_txn:
+            conn.rollback()
+            if attempt < max_attempts - 1:
+                # Short randomized backoff. Safe to sleep here only because
+                # the rollback above released the write lock — sleeping
+                # while holding it is what turns one collision into a
+                # pile-up of "database is locked" failures for everyone
+                # else.
+                time.sleep(random.uniform(0.02, 0.08) * (attempt + 1))
+        elif attempt < max_attempts - 1:
+            # Caller-owned transaction: we can't roll it back to retry, and
+            # the caller already holds the write lock, so a second read of
+            # MAX() is the only thing that can change.
+            pass
+    raise DocumentNumberConflictError(
+        f'Could not generate a unique document number after {max_attempts} '
+        f'attempts') from last_err
 
 if __name__ == '__main__':
     # `python3 database.py`               -> just (re)run init/migrations.

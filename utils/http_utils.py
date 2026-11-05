@@ -8,11 +8,19 @@ import json
 import os
 import re
 import secrets
+import sys
 import time
 import urllib.parse
 import html as _html
 from http.cookies import SimpleCookie, CookieError
 from threading import Lock
+
+try:  # POSIX: whole-file advisory locks
+    import fcntl
+except ImportError:
+    fcntl = None
+if fcntl is None:  # Windows: byte-range locks
+    import msvcrt
 
 
 def _atomic_write_private(path, write_fn):
@@ -23,8 +31,13 @@ def _atomic_write_private(path, write_fn):
     by any other local account on a shared host — set the mode on the
     temp file *before* any content is written, and before the atomic
     rename makes it visible, so there's no window where the data sits
-    world-readable."""
-    tmp_path = path + '.tmp'
+    world-readable.
+
+    The temp name is unique per writer rather than a fixed `path + '.tmp'`:
+    on Windows a second writer's rename onto a `.tmp` the first one is
+    still holding open fails outright, and that update is lost. Unlinked
+    leftovers are cleaned by whoever next touches the store."""
+    tmp_path = f'{path}.{os.getpid()}.{secrets.token_hex(6)}.tmp'
     fd = os.open(tmp_path, os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o600)
     try:
         with os.fdopen(fd, 'w', encoding='utf-8') as f:
@@ -36,6 +49,158 @@ def _atomic_write_private(path, write_fn):
             pass
         raise
     os.replace(tmp_path, path)  # atomic on POSIX
+
+
+class StoreLockTimeout(RuntimeError):
+    """Another process held a store's lock for longer than the timeout, so
+    this read/write was abandoned instead of guessing. Better a failed
+    request than a silently clobbered store."""
+
+
+class _StoreGuard:
+    """Replaces a plain `threading.Lock` for a JSON file store.
+
+    Usable exactly like a lock (`with guard:`), so call sites don't change,
+    but it takes *two* locks: an in-process one and an advisory lock on a
+    sibling `.lock` file. The file lock is the part that matters in
+    production — `passenger_wsgi.py` runs several OS processes over the same
+    directory, and a threading.Lock can't see across process boundaries.
+    Without it, two workers load the same snapshot, each adds its own key,
+    and the later rename discards the other's work: 6 processes writing 40
+    sessions each left 42 of 240 on disk.
+
+    The order (thread lock, then file lock) also means a process only ever
+    has one thread contending for its own file handle, which matters on
+    Windows where byte-range locks are per-file, not per-thread."""
+
+    def __init__(self, path, timeout=None):
+        self.path = path
+        self.lock_path = path + '.lock'
+        self.timeout = timeout if timeout is not None else STORE_LOCK_TIMEOUT
+        self._thread_lock = Lock()
+        self._fd = None
+
+    def __enter__(self):
+        self._thread_lock.acquire()
+        try:
+            self._fd = os.open(self.lock_path,
+                               os.O_RDWR | os.O_CREAT, 0o600)
+            self._acquire()
+        except BaseException:
+            self._thread_lock.release()
+            self._close_fd()
+            raise
+        return self
+
+    def __exit__(self, *exc_info):
+        self._release()
+        self._close_fd()
+        self._thread_lock.release()
+        return False
+
+    def _close_fd(self):
+        if self._fd is not None:
+            try:
+                os.close(self._fd)
+            except OSError:
+                pass
+            self._fd = None
+
+    def _acquire(self):
+        deadline = time.monotonic() + self.timeout
+        while True:
+            try:
+                if fcntl is not None:
+                    fcntl.flock(self._fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                else:
+                    os.lseek(self._fd, 0, os.SEEK_SET)
+                    msvcrt.locking(self._fd, msvcrt.LK_NBLCK, 1)
+                return
+            except OSError:
+                if time.monotonic() >= deadline:
+                    raise StoreLockTimeout(
+                        f'another process is still writing {self.path}')
+                time.sleep(0.02)
+
+    def _release(self):
+        if self._fd is None:
+            return
+        try:
+            if fcntl is not None:
+                fcntl.flock(self._fd, fcntl.LOCK_UN)
+            else:
+                os.lseek(self._fd, 0, os.SEEK_SET)
+                msvcrt.locking(self._fd, msvcrt.LK_UNLCK, 1)
+        except OSError:
+            pass  # closing the handle releases the lock anyway
+
+
+STORE_LOCK_TIMEOUT = 15  # seconds
+
+
+def cross_process_lock(target_path, timeout=None):
+    """A `with ...:` lock that spans processes as well as threads, for
+    protecting `target_path`.
+
+    Public name for _StoreGuard, for the one place outside this module that
+    needs it: swapping the database file during a restore has to exclude
+    both another request in this process and another Passenger worker, and
+    a plain threading.Lock only reaches the first."""
+    return _StoreGuard(target_path, timeout=timeout)
+
+
+def _load_store(path):
+    """Parse a JSON store file.
+
+    A file that exists but can't be read is NOT treated as empty: the old
+    `except (JSONDecodeError, OSError): return {}` turned a truncated write
+    or a full disk into "no sessions", and the next save then overwrote the
+    real data with that empty dict — i.e. one damaged read became total,
+    silent data loss. Damaged files are moved aside instead, so the store
+    keeps working and the evidence is still on disk."""
+    if not os.path.exists(path):
+        return {}
+    try:
+        with open(path, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+    except (ValueError, OSError):
+        return _quarantine_unreadable(path)
+    if not isinstance(data, dict):
+        return _quarantine_unreadable(path)
+    return data
+
+
+def _quarantine_unreadable(path):
+    bad = f'{path}.unreadable-{time.strftime("%Y%m%d-%H%M%S")}'
+    try:
+        os.replace(path, bad)
+        print(f'[http_utils] {os.path.basename(path)} was unreadable; kept '
+              f'a copy as {os.path.basename(bad)} and started a fresh store',
+              file=sys.stderr)
+    except OSError:
+        pass
+    return {}
+
+
+def _sweep_stale_tmp(path):
+    """Remove abandoned per-writer temp files next to a store. Best-effort
+    and only called while holding that store's lock."""
+    prefix = os.path.basename(path) + '.'
+    directory = os.path.dirname(path) or '.'
+    try:
+        names = os.listdir(directory)
+    except OSError:
+        return
+    for name in names:
+        if not (name.startswith(prefix) and name.endswith('.tmp')):
+            continue
+        try:
+            full = os.path.join(directory, name)
+            if time.time() - os.path.getmtime(full) > STORE_LOCK_TIMEOUT:
+                os.remove(full)
+        except OSError:
+            pass
+
 
 
 def esc(s):
@@ -100,20 +265,15 @@ SESSION_LIFETIME_SECONDS = 7 * 24 * 60 * 60  # 7 days
 # per-process dict that gets wiped on every restart/new worker.
 _SESSIONS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                'sessions.json')
-_lock = Lock()
+_lock = _StoreGuard(_SESSIONS_FILE)
 
 
 def _load_sessions():
-    if not os.path.exists(_SESSIONS_FILE):
-        return {}
-    try:
-        with open(_SESSIONS_FILE, 'r', encoding='utf-8') as f:
-            return json.load(f)
-    except (json.JSONDecodeError, OSError):
-        return {}
+    return _load_store(_SESSIONS_FILE)
 
 
 def _save_sessions(sessions):
+    _sweep_stale_tmp(_SESSIONS_FILE)
     _atomic_write_private(_SESSIONS_FILE, lambda f: json.dump(sessions, f))
 
 
@@ -192,6 +352,59 @@ def destroy_session(cookie_header):
         sessions = _load_sessions()
         sessions.pop(sid.value, None)
         _save_sessions(sessions)
+
+
+def sid_from_cookie(cookie_header):
+    """The `sid` cookie value in this request's header, or None."""
+    if not cookie_header:
+        return None
+    c = SimpleCookie()
+    try:
+        c.load(cookie_header)
+    except CookieError:
+        return None
+    sid = c.get('sid')
+    return sid.value if sid else None
+
+
+def invalidate_user_sessions(user_id, keep_sid=None):
+    """Delete every stored session belonging to `user_id` and return how
+    many were removed.
+
+    Sessions used to be trusted for their full lifetime no matter what
+    happened to the account afterwards, so deactivating or deleting a user
+    left their already-issued cookie working for up to 7 days. `keep_sid`
+    excludes one session, which is what a password change wants: the other
+    devices get logged out, the device that just changed the password stays
+    signed in."""
+    with _lock:
+        sessions = _load_sessions()
+        victims = [sid for sid, data in sessions.items()
+                   if sid != keep_sid
+                   and isinstance(data, dict)
+                   and data.get('user_id') == user_id]
+        for sid in victims:
+            sessions.pop(sid, None)
+        if victims:
+            _save_sessions(sessions)
+    return len(victims)
+
+
+def clear_all_sessions():
+    """Empty the session store.
+
+    Needed when the identity data *behind* those sessions is replaced in one
+    go — restoring a database backup. The store is a file and the users are
+    rows, so a restore leaves every cookie already handed out still pointing
+    at an id, while `id 2` may now be a different person (or an admin) in the
+    restored database. Nobody notices, because nothing cross-checks the two
+    on each request. Logging everyone out is the safe answer, and a restore
+    is already an admin-only, once-in-a-while action."""
+    with _lock:
+        live = _load_sessions()
+        if live:
+            _save_sessions({})
+        return len(live)
 
 
 class _SessionsProxy:
@@ -284,21 +497,16 @@ def logout_cookie_header():
 # out of a response it isn't allowed to see.
 _CSRF_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                            'csrf_tokens.json')
-_csrf_lock = Lock()
+_csrf_lock = _StoreGuard(_CSRF_FILE)
 CSRF_TOKEN_LIFETIME = 60 * 60  # 1 hour
 
 
 def _load_csrf():
-    if not os.path.exists(_CSRF_FILE):
-        return {}
-    try:
-        with open(_CSRF_FILE, 'r', encoding='utf-8') as f:
-            return json.load(f)
-    except (json.JSONDecodeError, OSError):
-        return {}
+    return _load_store(_CSRF_FILE)
 
 
 def _save_csrf(tokens):
+    _sweep_stale_tmp(_CSRF_FILE)
     _atomic_write_private(_CSRF_FILE, lambda f: json.dump(tokens, f))
 
 
@@ -331,23 +539,18 @@ def consume_csrf_token(token):
 # network, and without needing a DB migration.
 _ATTEMPTS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                'login_attempts.json')
-_attempts_lock = Lock()
+_attempts_lock = _StoreGuard(_ATTEMPTS_FILE)
 
 MAX_LOGIN_ATTEMPTS = 5
 LOCKOUT_SECONDS = 15 * 60  # 15 minutes
 
 
 def _load_attempts():
-    if not os.path.exists(_ATTEMPTS_FILE):
-        return {}
-    try:
-        with open(_ATTEMPTS_FILE, 'r', encoding='utf-8') as f:
-            return json.load(f)
-    except (json.JSONDecodeError, OSError):
-        return {}
+    return _load_store(_ATTEMPTS_FILE)
 
 
 def _save_attempts(attempts):
+    _sweep_stale_tmp(_ATTEMPTS_FILE)
     _atomic_write_private(_ATTEMPTS_FILE, lambda f: json.dump(attempts, f))
 
 
@@ -647,8 +850,37 @@ def parse_multipart(body, content_type):
 
 
 # ── RESPONSE HELPERS ──
+_CONTROL_CHARS_RE = re.compile(r'[\x00-\x20\x7f]')
+
+
+def json_for_script(value):
+    """`json.dumps` for a value being embedded literally inside a
+    `<script>` block.
+
+    Plain `json.dumps` is not enough there: it never escapes `/`, so a
+    string containing `</script>` — a search box's own text, echoed back
+    into the page state — closes the script element and the rest becomes
+    live markup. That's reflected XSS, and the CSP ships
+    `script-src 'unsafe-inline'`, so the payload runs. Escaping the `<` of
+    every closing tag neutralises it while leaving the JSON exactly as
+    valid for the JS parser (a backslash before a forward slash inside a
+    string literal is just the slash).
+
+    Same idea the `items_json` builders elsewhere in this app already use;
+    this is that rule in one place so a new page state can't forget it."""
+    return json.dumps(value).replace('</', '<\\/')
+
+
 def redirect(url):
-    return None, 302, [('Location', url)]
+    """Response tuple for a 302 to an internal path.
+
+    Control characters — CR and LF above all — are stripped here instead of
+    at each of the ~50 call sites, because this is the single funnel every
+    Location header passes through and some of those headers are built from
+    request data (`?next=`, a `redirect` form field). A newline that got
+    through would let one form submission inject arbitrary extra response
+    headers."""
+    return None, 302, [('Location', _CONTROL_CHARS_RE.sub('', str(url)) or '/')]
 
 
 def json_response(data, status=200):

@@ -29,6 +29,7 @@ from utils.http_utils import new_csrf_token, consume_csrf_token
 from app.ml.common import (
     load_cache, save_cache, sklearn_available,
     seconds_since_last_refresh, MIN_REFRESH_INTERVAL_SECONDS,
+    claim_refresh_slot, release_refresh_slot,
 )
 from app.ml.forecasting import compute_forecast
 from app.ml.pricing import compute_pricing_suggestions
@@ -309,33 +310,47 @@ class BusinessMetricsPagesMixin:
                                  msg='Your session expired — please try again.'),
                 status=400))
 
-        wait_left = seconds_since_last_refresh()
-        if wait_left is not None and wait_left < MIN_REFRESH_INTERVAL_SECONDS:
-            remaining = int(MIN_REFRESH_INTERVAL_SECONDS - wait_left)
+        # Claim the single retrain slot before anything else and hold it for
+        # the whole job. The interval check below can't make that decision on
+        # its own: it reads the *previous* run's timestamp, so two admins
+        # pressing Refresh in the same instant both passed it and then both
+        # trained and wrote the same three cache files.
+        if not claim_refresh_slot():
             return self.send(*html_response(
                 self.pg_metrics(user_id, err=True,
-                                 msg=f'Please wait {remaining}s before refreshing again.'),
+                                msg='A refresh is already running — please '
+                                    'wait for it to finish.'),
                 status=429))
-
-        now = time.time()
         try:
-            forecast = compute_forecast()
-            forecast['computed_at'] = now
-            save_cache('forecast', forecast)
+            wait_left = seconds_since_last_refresh()
+            if wait_left is not None and wait_left < MIN_REFRESH_INTERVAL_SECONDS:
+                remaining = int(MIN_REFRESH_INTERVAL_SECONDS - wait_left)
+                return self.send(*html_response(
+                    self.pg_metrics(user_id, err=True,
+                                    msg=f'Please wait {remaining}s before refreshing again.'),
+                    status=429))
 
-            pricing = compute_pricing_suggestions()
-            pricing['computed_at'] = now
-            save_cache('pricing', pricing)
+            now = time.time()
+            try:
+                forecast = compute_forecast()
+                forecast['computed_at'] = now
+                save_cache('forecast', forecast)
 
-            anomalies = compute_anomalies()
-            anomalies['computed_at'] = now
-            save_cache('anomalies', anomalies)
-        except MLUnavailableError as e:
-            return self.send(*html_response(
-                self.pg_metrics(user_id, err=True, msg=str(e)), status=200))
-        # Anything else (a genuine bug) is deliberately left to propagate:
-        # do_POST's centralized handler (app/routing.py) logs it server-side
-        # and shows a generic error, rather than this masking it as either
-        # a "friendly" message or a silent partial success.
+                pricing = compute_pricing_suggestions()
+                pricing['computed_at'] = now
+                save_cache('pricing', pricing)
+
+                anomalies = compute_anomalies()
+                anomalies['computed_at'] = now
+                save_cache('anomalies', anomalies)
+            except MLUnavailableError as e:
+                return self.send(*html_response(
+                    self.pg_metrics(user_id, err=True, msg=str(e)), status=200))
+            # Anything else (a genuine bug) is deliberately left to propagate:
+            # do_POST's centralized handler (app/routing.py) logs it server-side
+            # and shows a generic error, rather than this masking it as either
+            # a "friendly" message or a silent partial success.
+        finally:
+            release_refresh_slot()
 
         return self.send(*redirect('/metrics'))

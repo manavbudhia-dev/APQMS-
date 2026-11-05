@@ -14,6 +14,7 @@ from utils.http_utils import parse_form
 from utils.http_utils import parse_multipart
 from utils.http_utils import is_same_origin
 from database import get_db
+from database import begin_immediate
 
 
 _GENERIC_ERROR_PAGE = (
@@ -785,12 +786,41 @@ class RoutingMixin:
     def _delete_customer(self, cid):
         return self._delete_customers_bulk(str(cid))
 
+    @staticmethod
+    def _parse_id_list(ids_raw):
+        """Comma-separated ids -> list[int], ignoring anything unusable.
+
+        `str.isdigit()` is True for characters int() rejects (e.g. '²'), and
+        int() on a several-thousand-digit string is both slow and past
+        Python's own conversion limit — either one turned a junk `ids`
+        parameter into an unhandled ValueError and a 500. Bounding the
+        length and catching the failure keeps a malformed request a no-op.
+        """
+        ids = []
+        for part in str(ids_raw or '').split(','):
+            part = part.strip()
+            if not part.isdigit() or len(part) > 18:
+                continue
+            try:
+                ids.append(int(part))
+            except ValueError:
+                continue
+        return ids
+
     def _delete_customers_bulk(self, ids_raw):
-        ids = [int(x) for x in str(ids_raw).split(',') if x.strip().isdigit()]
+        ids = self._parse_id_list(ids_raw)
         deleted = blocked = 0
         if ids:
             db = get_db()
             try:
+                # One IMMEDIATE transaction for the whole batch. The
+                # "is this customer still referenced?" check and the DELETE
+                # that follows it must not be separable: with a deferred
+                # transaction another request could attach a quotation to
+                # the customer in between, and since quotations.customer_id
+                # is a foreign key with no ON DELETE action the DELETE would
+                # then fail and take the entire batch down with it.
+                begin_immediate(db)
                 for cid in ids:
                     if self._customer_in_use(db, cid):
                         blocked += 1
@@ -838,7 +868,7 @@ class RoutingMixin:
         return self.send(*redirect('/items'))
 
     def _delete_items_bulk(self, ids_raw):
-        ids = [int(x) for x in str(ids_raw).split(',') if x.strip().isdigit()]
+        ids = self._parse_id_list(ids_raw)
         if ids:
             db = get_db()
             try:
@@ -869,11 +899,14 @@ class RoutingMixin:
         # record in its own right (goods already shipped) — it shouldn't be
         # deleted or blocked, just unlinked from the proforma it came from,
         # same idea as how _delete_item nulls out pointers instead of
-        # cascading. NOTE: assumes `packing_lists.proforma_id`; adjust if
-        # your schema names it differently.
+        # cascading.
         db = get_db()
         try:
-            db.execute("UPDATE packing_lists SET proforma_id=NULL WHERE proforma_id=?", (pid,))
+            # `packing_lists.pi_id`, not `proforma_id` — see the schema in
+            # database.py. The wrong column name made every proforma delete
+            # raise "no such column" (a 500) and delete nothing.
+            begin_immediate(db)
+            db.execute("UPDATE packing_lists SET pi_id=NULL WHERE pi_id=?", (pid,))
             db.execute("DELETE FROM proforma_invoice_items WHERE proforma_id=?", (pid,))
             db.execute("DELETE FROM proforma_invoices WHERE id=?", (pid,))
             db.commit()
@@ -895,12 +928,15 @@ class RoutingMixin:
         return self.send(*redirect('/packing'))
 
     def _delete_employee(self, eid):
-        # NOTE: assumes a `salary_advances` table keyed by `employee_id`,
-        # matching the naming used by `attendance` — adjust the table/column
-        # name below if your schema calls it something else.
         db = get_db()
         try:
-            db.execute("DELETE FROM salary_advances WHERE employee_id=?", (eid,))
+            # There is no `salary_advances` table in this schema (see
+            # database.py init_db) — deleting from it raised "no such
+            # table" and made every employee delete a 500 that removed
+            # nothing. Attendance rows are linked ON DELETE CASCADE, but
+            # are cleared explicitly too so the delete doesn't depend on
+            # the foreign_keys pragma being honoured.
+            begin_immediate(db)
             db.execute("DELETE FROM attendance WHERE employee_id=?", (eid,))
             db.execute("DELETE FROM employees WHERE id=?", (eid,))
             db.commit()
@@ -908,22 +944,29 @@ class RoutingMixin:
             db.close()
         return self.send(*redirect('/salary'))
 
-    # Recognized status values per table. `form.get('status', 'Draft')` only
-    # ever falls back to 'Draft' when the key is *missing*; a client can
-    # still submit `status=` (empty) or any arbitrary/misspelled string.
-    # NOTE: these value sets are placeholders based on the tables' apparent
-    # purpose — replace them with whatever status values this app's UI
-    # actually offers for quotations / proforma invoices / packing lists.
-    _STATUS_WHITELIST = {
-        'quotations': {'Draft', 'Sent', 'Accepted', 'Rejected', 'Expired'},
-        'proforma_invoices': {'Draft', 'Sent', 'Accepted', 'Rejected', 'Expired'},
-        'packing_lists': {'Draft', 'Packed', 'Shipped', 'Delivered'},
+    # Which status list applies to which table. The values themselves are
+    # NOT restated here: each page module already owns the single list its
+    # create/edit forms and filter chips are built from, so referencing it
+    # through `self` means the two can't drift apart. A duplicated copy did
+    # exactly that — it listed Accepted/Rejected/Expired for quotations and
+    # Packed/Shipped/Delivered for packing lists, none of which this app
+    # offers, so every legitimate status change fell through to the
+    # fallback and was silently rewritten to 'Draft'.
+    _STATUS_LIST_ATTR = {
+        'quotations': 'QUOTATION_STATUSES',
+        'proforma_invoices': 'PROFORMA_STATUSES',
+        'packing_lists': 'PACKING_STATUSES',
     }
 
     def _set_status(self, table, row_id, form, redirect_fmt):
+        attr = self._STATUS_LIST_ATTR.get(table)
+        if attr is None:
+            # `table` is interpolated into the SQL below, so it must never
+            # be anything other than one of the three known keys.
+            return self.send(*redirect(redirect_fmt.format(row_id)))
+        allowed = getattr(self, attr)
         status = (form.get('status') or 'Draft').strip()
-        allowed = self._STATUS_WHITELIST.get(table)
-        if allowed is not None and status not in allowed:
+        if status not in allowed:
             status = 'Draft'
         db = get_db()
         try:

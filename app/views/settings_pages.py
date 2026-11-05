@@ -29,11 +29,16 @@ from utils.http_utils import (
     redirect,
     new_csrf_token,
     consume_csrf_token,
+    invalidate_user_sessions,
+    clear_all_sessions,
+    cross_process_lock,
+    StoreLockTimeout,
     update_session,
     file_response,
     UploadedFile,
 )
 from database import get_db, DB_PATH, init_db
+from database import wait_for_connections_to_close
 from utils import backup_crypto
 
 # Upstream sanity limit for an uploaded restore file — comfortably above
@@ -312,9 +317,11 @@ class SettingsPagesMixin:
 
             try:
                 check = sqlite3.connect(tmp_path)
-                tables = {r[0] for r in check.execute(
-                    "SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
-                check.close()
+                try:
+                    tables = {r[0] for r in check.execute(
+                        "SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
+                finally:
+                    check.close()
             except sqlite3.DatabaseError:
                 return False, 'That file is not a valid SQLite database.'
 
@@ -323,30 +330,93 @@ class SettingsPagesMixin:
                 return False, ("That backup doesn't look like an APQMS database — "
                                 "it's missing expected tables.")
 
-            # Safety copy of the current live database before it's
-            # overwritten, kept alongside it on the server.
-            if os.path.exists(DB_PATH):
-                stamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-                pre_restore_path = os.path.join(
-                    os.path.dirname(os.path.abspath(DB_PATH)),
-                    f'pre_restore_backup_{stamp}.db')
+            # Everything below replaces the live file, so it happens under a
+            # lock other workers and other requests can't be inside at the
+            # same time, and only once nothing in this process still has the
+            # database open.
+            #
+            # That matters because an open connection is not disturbed by
+            # os.replace(): it keeps writing to the inode it opened, which is
+            # now unlinked. Those writes are not an error and not a rollback —
+            # they land on a file nothing will ever read again, so a quotation
+            # saved during a restore simply disappears while the save reports
+            # success.
+            try:
+                swap = cross_process_lock(DB_PATH, timeout=10)
+            except (OSError, StoreLockTimeout):
+                return False, ('Another restore is in progress — try again '
+                               'in a moment.')
+            with swap:
+                # Fold the WAL back into the main file first, so both the
+                # safety copy below and the file being replaced are complete
+                # on their own rather than "main file + sidecar".
                 try:
-                    shutil.copy2(DB_PATH, pre_restore_path)
-                except OSError:
-                    pass  # best-effort — never block the restore on this
-
-            # Drop stale WAL/SHM sidecar files from the outgoing database
-            # so they can't get paired with the replacement file.
-            for suffix in ('-wal', '-shm'):
-                sidecar = DB_PATH + suffix
-                if os.path.exists(sidecar):
+                    src = get_db()
                     try:
-                        os.remove(sidecar)
-                    except OSError:
-                        pass
+                        src.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+                    finally:
+                        src.close()
+                except sqlite3.Error:
+                    pass  # best-effort; the drain check below is the real guard
 
-            os.replace(tmp_path, DB_PATH)
-            tmp_path = None  # already moved into place
+                if not wait_for_connections_to_close(timeout=5.0):
+                    return False, ('Other requests are still using the '
+                                   'database right now — nothing was '
+                                   'restored. Please try again in a second.')
+
+                # Then prove no *other process* is mid-write, using SQLite's
+                # own write lock: the drain above can only see this process,
+                # and on Windows a held handle would make the rename below
+                # fail outright, so the lock is taken purely as a probe and
+                # released immediately before the swap.
+                probe = None
+                try:
+                    probe = sqlite3.connect(DB_PATH, timeout=2.0)
+                    probe.isolation_level = None
+                    probe.execute('BEGIN IMMEDIATE')
+                except sqlite3.Error:
+                    return False, ('Something is still writing to the database '
+                                   '— nothing was restored. Please try again.')
+                finally:
+                    if probe is not None:
+                        try:
+                            probe.rollback()
+                        except sqlite3.Error:
+                            pass
+                        try:
+                            probe.close()
+                        except sqlite3.Error:
+                            pass
+
+                # Safety copy of the current live database before it's
+                # overwritten, kept alongside it on the server.
+                if os.path.exists(DB_PATH):
+                    stamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+                    pre_restore_path = os.path.join(
+                        os.path.dirname(os.path.abspath(DB_PATH)),
+                        f'pre_restore_backup_{stamp}.db')
+                    try:
+                        shutil.copy2(DB_PATH, pre_restore_path)
+                    except OSError:
+                        pass  # best-effort — never block the restore on this
+
+                # Drop stale WAL/SHM sidecar files from the outgoing
+                # database so they can't get paired with the replacement
+                # file.
+                for suffix in ('-wal', '-shm'):
+                    sidecar = DB_PATH + suffix
+                    if os.path.exists(sidecar):
+                        try:
+                            os.remove(sidecar)
+                        except OSError:
+                            pass
+
+                try:
+                    os.replace(tmp_path, DB_PATH)
+                    tmp_path = None  # already moved into place
+                except OSError as e:
+                    return False, (f'Could not replace the database file '
+                                   f'({e.strerror or e}) — nothing was restored.')
 
             # Apply schema migrations in case the uploaded backup predates
             # a column/table the running app now expects (a no-op if the
@@ -356,7 +426,16 @@ class SettingsPagesMixin:
             except Exception:
                 pass
 
-            return True, 'Database restored from backup. All data now reflects the uploaded file.'
+            # Sessions live in a file, users live in rows: after swapping the
+            # database every cookie already handed out still names an id, and
+            # that id can now belong to somebody else — including an admin.
+            # Sign everyone out rather than letting stale sessions resolve
+            # against the restored accounts.
+            signed_out = clear_all_sessions()
+            return True, ('Database restored from backup. All data now '
+                          'reflects the uploaded file'
+                          + (f'; {signed_out} active session(s) were signed out.'
+                             if signed_out else '.'))
         finally:
             if tmp_path and os.path.exists(tmp_path):
                 os.remove(tmp_path)
@@ -371,10 +450,21 @@ class SettingsPagesMixin:
         if target_id == user_id:
             return redirect('/settings')
         db = get_db()
-        db.execute("UPDATE users SET is_active = 1 - COALESCE(is_active, 1) WHERE id=?",
-                   (target_id,))
-        db.commit()
-        db.close()
+        try:
+            db.execute("UPDATE users SET is_active = 1 - COALESCE(is_active, 1) WHERE id=?",
+                       (target_id,))
+            db.commit()
+            now_active = db.execute("SELECT COALESCE(is_active, 1) a FROM users WHERE id=?",
+                                    (target_id,)).fetchone()
+        finally:
+            db.close()
+        # Deactivating has to also end the sessions already issued to that
+        # account. They live in the session store, not the users table, and
+        # nothing compared the two — so the flag changed, the login form
+        # started refusing them, and every tab already open carried on
+        # working for the rest of that session's 7-day life.
+        if now_active is not None and not now_active['a']:
+            invalidate_user_sessions(target_id)
         return redirect('/settings')
 
     def _delete_user(self, user_id, target_id):
@@ -397,13 +487,20 @@ class SettingsPagesMixin:
             db.commit()
         finally:
             db.close()
+        # Same reason as above, and worse here: the account is gone from
+        # the database but its session survives, so a deleted user keeps
+        # signed-in access as a row that no longer exists — the pages just
+        # keep trusting the stored user_id/role.
+        invalidate_user_sessions(target_id)
         return redirect('/settings')
 
     # ── HELPERS ──────────────────────────────────────────────
     def _is_admin(self, user_id):
         db = get_db()
-        row = db.execute("SELECT role FROM users WHERE id=?", (user_id,)).fetchone()
-        db.close()
+        try:
+            row = db.execute("SELECT role FROM users WHERE id=?", (user_id,)).fetchone()
+        finally:
+            db.close()
         return bool(row) and row['role'] == 'admin'
 
     @staticmethod
@@ -415,16 +512,28 @@ class SettingsPagesMixin:
         an inconsistent snapshot; conn.backup() does not have that problem."""
         fd, tmp_path = tempfile.mkstemp(suffix='.db')
         os.close(fd)
+        src = dst = None
         try:
             src = sqlite3.connect(DB_PATH)
             dst = sqlite3.connect(tmp_path)
             with dst:
                 src.backup(dst)
-            src.close()
             dst.close()
+            dst = None
+            src.close()
+            src = None
             with open(tmp_path, 'rb') as f:
                 return f.read()
         finally:
+            # Both handles closed even when backup() itself raises — a leak
+            # here is not harmless, because a lingering connection is exactly
+            # what makes a later restore refuse to run.
+            for conn in (dst, src):
+                if conn is not None:
+                    try:
+                        conn.close()
+                    except sqlite3.Error:
+                        pass
             os.remove(tmp_path)
 
     @staticmethod
@@ -435,26 +544,49 @@ class SettingsPagesMixin:
         os.makedirs(BACKUP_DIR, exist_ok=True)
         stamp = datetime.now().strftime('%Y%m%d_%H%M%S')
         ext = '.db.enc' if encrypted else '.db'
-        name, n = f'aypee_backup_{stamp}{ext}', 1
-        while os.path.exists(os.path.join(BACKUP_DIR, name)):
-            name = f'aypee_backup_{stamp}_{n}{ext}'   # two saves in one second
-            n += 1
-        final_path = os.path.join(BACKUP_DIR, name)
         fd, tmp_path = tempfile.mkstemp(dir=BACKUP_DIR, suffix='.tmp')
+        with os.fdopen(fd, 'wb') as f:
+            f.write(data)
+            f.flush()
+            os.fsync(f.fileno())
         try:
-            with os.fdopen(fd, 'wb') as f:
-                f.write(data)
-                f.flush()
-                os.fsync(f.fileno())
+            os.chmod(tmp_path, 0o600)
+        except OSError:
+            pass
+        # The name is *reserved* rather than tested for. A
+        # `while os.path.exists(name): name = ...` loop only reads the
+        # directory and then writes separately, so two backups saved in the
+        # same second could both choose the same name and the second rename
+        # would silently destroy the first — losing a backup the admin
+        # believes they have. O_EXCL makes "nobody has this name" and "this
+        # name is mine" a single atomic statement.
+        name = None
+        for n in range(1, 1000):
+            candidate = (f'aypee_backup_{stamp}{ext}' if n == 1
+                         else f'aypee_backup_{stamp}_{n}{ext}')
+            final_path = os.path.join(BACKUP_DIR, candidate)
             try:
-                os.chmod(tmp_path, 0o600)
+                reserve = os.open(final_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+            except FileExistsError:
+                continue
             except OSError:
-                pass
-            os.replace(tmp_path, final_path)
+                break
+            os.close(reserve)
+            try:
+                os.replace(tmp_path, final_path)
+            except OSError:
+                try:
+                    os.remove(final_path)
+                except OSError:
+                    pass
+                raise
             tmp_path = None
-        finally:
+            name = candidate
+            break
+        if name is None:
             if tmp_path and os.path.exists(tmp_path):
                 os.remove(tmp_path)
+            raise OSError('Could not reserve a filename for the server backup')
 
         for old in SettingsPagesMixin._list_server_backups()[MAX_SERVER_BACKUPS:]:
             try:
@@ -551,7 +683,14 @@ class SettingsPagesMixin:
         else:
             alert = ''
 
-        csrf_token = new_csrf_token()
+        # One token per form, not one for the whole page: these tokens are
+        # single-use and consumed on submit, so a shared token meant the
+        # first form submitted worked and every other form on the same page
+        # load came back "Your session expired" — including reloading the
+        # page with the other form still filled in.
+        profile_csrf_token = new_csrf_token()
+        backup_csrf_token = new_csrf_token()
+        restore_csrf_token = new_csrf_token()
 
         # ── Stats row (icon + number + label per item) ──
         stat_icons = {
@@ -693,7 +832,7 @@ class SettingsPagesMixin:
   </div>
   <div class="set-stats-row">{stats_html}</div>
   <form method="POST" action="/settings/backup" id="backupForm">
-    <input type="hidden" name="csrf_token" value="{esc(csrf_token)}">
+    <input type="hidden" name="csrf_token" value="{esc(backup_csrf_token)}">
     <div class="d-flex align-items-center justify-content-between flex-wrap gap-2">
       <div class="d-flex flex-wrap gap-2">
         <button type="submit" class="btn btn-primary" id="backupDownloadBtn">
@@ -747,7 +886,7 @@ class SettingsPagesMixin:
       system back to that point in time — same customers, items, quotations and everything else it had.</div>
       <form method="POST" action="/settings/restore" enctype="multipart/form-data" class="mt-2"
             onsubmit="return confirm('This will REPLACE all current data with the uploaded backup. A safety copy of what\'s on the server now will be kept, but there is no in-app undo. Continue?');">
-        <input type="hidden" name="csrf_token" value="{esc(csrf_token)}">
+        <input type="hidden" name="csrf_token" value="{esc(restore_csrf_token)}">
         <div class="d-flex flex-wrap gap-2 align-items-center">
           <input type="file" name="db_file" accept=".db,.enc" required
                  class="form-control form-control-sm" style="max-width:280px;">
@@ -875,7 +1014,7 @@ class SettingsPagesMixin:
         </div>
       </div>
       <form method="POST" action="/settings/profile">
-        <input type="hidden" name="csrf_token" value="{esc(csrf_token)}">
+        <input type="hidden" name="csrf_token" value="{esc(profile_csrf_token)}">
         <div class="mb-3">
           <label class="form-label">Full Name</label>
           <div class="input-group set-field">

@@ -6,6 +6,38 @@ from database import get_db
 from datetime import datetime
 import calendar
 import json
+import re
+
+
+_MONTH_RE = re.compile(r'^\d{4}-(0[1-9]|1[0-2])$')
+
+
+def _safe_month(month):
+    """Return a client-supplied month as a strict 'YYYY-MM', or the current
+    month if it isn't one.
+
+    This value is used three ways that all break on arbitrary input: as the
+    prefix of a LIKE pattern, so '%' matches every month and 'clear this
+    month' deletes a year of attendance; as an argument to
+    calendar.monthrange, so '2026-13' raises and the page 500s; and straight
+    into `value="..."` and `href="..."` attributes, where a quote escapes
+    them. Falling back to the current month is also what the `<input
+    type="month">` widget shows when the field is left blank."""
+    if month is not None:
+        month = str(month).strip()
+        if _MONTH_RE.match(month):
+            return month
+    return datetime.now().strftime('%Y-%m')
+
+
+def _safe_hours(value):
+    """One unparseable overtime cell used to abort the whole month's save
+    partway through, after some days were already written and with the
+    connection left open."""
+    try:
+        return float(value or 0)
+    except (TypeError, ValueError):
+        return 0.0
 
 
 def _month_days(month):
@@ -331,24 +363,24 @@ class SalaryPagesMixin:
 
 
     def handle_attendance_save(self, eid, form):
+        month = _safe_month(form.get('month'))
         db = get_db()
-        month = form.get('month', datetime.now().strftime('%Y-%m'))
-        days_in_month = int(form.get('days_in_month', 30))
-        emp = db.execute("SELECT * FROM employees WHERE id=?", (eid,)).fetchone()
-        work_hrs = emp['working_hours_per_day'] if emp else 8
-        active = _employee_active_range(emp, month) if emp else (1, days_in_month)
-        first_day, last_day = active if active else (1, 0)  # (1,0) saves nothing
-        for day in range(first_day, last_day + 1):
-            date_str = f"{month}-{day:02d}"
-            is_present = 1 if form.get(f'present_{day}') == 'on' else 0
-            overtime = float(form.get(f'ot_{day}', 0) or 0)
-            checkout = form.get(f'checkout_{day}', '')
-            db.execute(
-                "INSERT OR REPLACE INTO attendance (employee_id, date, is_present, check_in, check_out, overtime_hours) "
-                "VALUES (?,?,?,?,?,?)",
-                (eid, date_str, is_present, '', checkout, round(overtime, 2)))
-        db.commit()
-        db.close()
+        try:
+            emp = db.execute("SELECT * FROM employees WHERE id=?", (eid,)).fetchone()
+            active = _employee_active_range(emp, month) if emp else (1, _month_days(month))
+            first_day, last_day = active if active else (1, 0)  # (1,0) saves nothing
+            for day in range(first_day, last_day + 1):
+                date_str = f"{month}-{day:02d}"
+                is_present = 1 if form.get(f'present_{day}') == 'on' else 0
+                overtime = _safe_hours(form.get(f'ot_{day}'))
+                checkout = form.get(f'checkout_{day}', '')
+                db.execute(
+                    "INSERT OR REPLACE INTO attendance (employee_id, date, is_present, check_in, check_out, overtime_hours) "
+                    "VALUES (?,?,?,?,?,?)",
+                    (eid, date_str, is_present, '', checkout, round(overtime, 2)))
+            db.commit()
+        finally:
+            db.close()
         return self.send(*redirect(f'/salary/{eid}?month={month}'))
 
 
@@ -420,13 +452,18 @@ class SalaryPagesMixin:
         """Wipe all attendance rows for one employee/month so it can be
         re-entered from scratch (e.g. after entering a month wrong, or
         to start a fresh blank month)."""
+        # `month` is the LIKE pattern here, so it is validated first: an
+        # unvalidated '%' would match every date and delete a year of
+        # attendance while reporting a successful one-month clear.
+        month = _safe_month(form.get('month'))
         db = get_db()
-        month = form.get('month', datetime.now().strftime('%Y-%m'))
-        db.execute(
-            "DELETE FROM attendance WHERE employee_id=? AND date LIKE ?",
-            (eid, f"{month}%"))
-        db.commit()
-        db.close()
+        try:
+            db.execute(
+                "DELETE FROM attendance WHERE employee_id=? AND date LIKE ?",
+                (eid, f"{month}%"))
+            db.commit()
+        finally:
+            db.close()
         return self.send(*redirect(f'/salary/{eid}/attendance?month={month}'))
 
 
@@ -434,7 +471,7 @@ class SalaryPagesMixin:
     def pg_salary_list(self, month=None):
         db = get_db()
         employees = db.execute("SELECT * FROM employees ORDER BY name").fetchall()
-        current_month = month or datetime.now().strftime('%Y-%m')
+        current_month = _safe_month(month)
         days_in_month = _month_days(current_month)
 
         now = datetime.now()
@@ -1160,7 +1197,7 @@ document.addEventListener('keydown', function(e) {{
         if not emp:
             db.close()
             return self.pg_404()
-        current_month = month or datetime.now().strftime('%Y-%m')
+        current_month = _safe_month(month)
         active = _employee_active_range(emp, current_month)
         if not active:
             db.close()
@@ -1305,7 +1342,7 @@ document.addEventListener('keydown', function(e) {{
         if not emp:
             db.close()
             return self.pg_404()
-        current_month = month or datetime.now().strftime('%Y-%m')
+        current_month = _safe_month(month)
         year, mo = (int(p) for p in current_month.split('-'))
         days_in_month = _month_days(current_month)
         active = _employee_active_range(emp, current_month)

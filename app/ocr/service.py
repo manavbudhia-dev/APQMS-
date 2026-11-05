@@ -228,7 +228,18 @@ def process(doc_id, force_ocr=False):
 # ── Queries and updates used by the pages ────────────────────────────
 def reap_stale(db):
     """A 'Processing' document older than STALE_MINUTES lost its worker
-    (server restart / crash) — mark it failed so it doesn't spin forever."""
+    (server restart / crash) — mark it failed so it doesn't spin forever.
+
+    Runs on every list/detail view, so the recovery UPDATE is only issued
+    when something actually needs recovering: an UPDATE that matches no
+    rows still takes the database write lock, which made simply looking at
+    the Scan & Import page contend with unrelated saves."""
+    stale = db.execute(
+        "SELECT 1 FROM ocr_documents WHERE status=? "
+        "AND created_at < datetime('now', ?) LIMIT 1",
+        (STATUS_PROCESSING, f'-{STALE_MINUTES} minutes')).fetchone()
+    if stale is None:
+        return
     db.execute(
         "UPDATE ocr_documents SET status=?, error_message=? WHERE status=? "
         "AND created_at < datetime('now', ?)",

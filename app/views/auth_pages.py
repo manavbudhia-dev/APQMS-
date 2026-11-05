@@ -10,6 +10,8 @@ from utils.http_utils import (
     is_locked_out,
     record_failed_login,
     clear_failed_logins,
+    invalidate_user_sessions,
+    sid_from_cookie,
     esc,
 )
 from database import get_db
@@ -38,11 +40,23 @@ class AuthPagesMixin:
                 status=429))
 
         db = get_db()
-        user = db.execute("SELECT * FROM users WHERE username=?",
-                          (username,)).fetchone()
-        db.close()
+        try:
+            user = db.execute("SELECT * FROM users WHERE username=?",
+                              (username,)).fetchone()
+        finally:
+            db.close()
         stored_hash = user['password'] if user else None
-        if user and verify_password_or_dummy(stored_hash, password):
+        # A PBKDF2 check is always run, even for a username that doesn't
+        # exist (see verify_password_or_dummy), so response timing can't be
+        # used to enumerate accounts. A deactivated account is verified and
+        # *then* refused for the same reason — refusing on the password
+        # check alone used to let "Deactivate" be a purely cosmetic badge on
+        # the Settings table while the account carried on signing in.
+        password_ok = bool(user) and verify_password_or_dummy(stored_hash, password)
+        is_active = user is None or user['is_active'] is None or bool(user['is_active'])
+        if password_ok and not is_active:
+            password_ok = False
+        if password_ok:
             clear_failed_logins(username, ip)
             sid = create_session({
                 'user_id': user['id'],
@@ -55,9 +69,6 @@ class AuthPagesMixin:
             self.send_header('Set-Cookie', session_cookie_header(sid))
             self.end_headers()
         else:
-            # Still run a dummy hash check above even when the user
-            # doesn't exist (see verify_password_or_dummy), so response
-            # timing can't be used to enumerate valid usernames.
             record_failed_login(username, ip)
             self.send(*html_response(self.pg_login(err=True)))
 
@@ -128,26 +139,31 @@ class AuthPagesMixin:
                 status=400))
 
         db = get_db()
-        user = db.execute("SELECT * FROM users WHERE id=?", (user_id,)).fetchone()
-        stored_hash = user['password'] if user else None
-        if not user or not verify_password_or_dummy(stored_hash, current):
-            db.close()
-            return self.send(*html_response(
-                self.pg_change_password(err=True, msg='Current password is incorrect')))
+        try:
+            user = db.execute("SELECT * FROM users WHERE id=?", (user_id,)).fetchone()
+            stored_hash = user['password'] if user else None
+            if not user or not verify_password_or_dummy(stored_hash, current):
+                return self.send(*html_response(
+                    self.pg_change_password(err=True, msg='Current password is incorrect')))
 
-        if new != confirm:
-            db.close()
-            return self.send(*html_response(
-                self.pg_change_password(err=True, msg='New passwords do not match')))
+            if new != confirm:
+                return self.send(*html_response(
+                    self.pg_change_password(err=True, msg='New passwords do not match')))
 
-        pw_error = self._password_policy_error(new)
-        if pw_error:
-            db.close()
-            return self.send(*html_response(self.pg_change_password(err=True, msg=pw_error)))
+            pw_error = self._password_policy_error(new)
+            if pw_error:
+                return self.send(*html_response(self.pg_change_password(err=True, msg=pw_error)))
 
-        db.execute("UPDATE users SET password=? WHERE id=?", (hash_password(new), user_id))
-        db.commit()
-        db.close()
+            db.execute("UPDATE users SET password=? WHERE id=?", (hash_password(new), user_id))
+            db.commit()
+        finally:
+            db.close()
+        # Every *other* session for this account is ended. Changing a
+        # password because you think someone else knows it only helps if it
+        # actually signs them out, and sessions live in the session store,
+        # which the password change otherwise never touched. The session
+        # that just submitted the change is kept so the user isn't bounced.
+        invalidate_user_sessions(user_id, keep_sid=sid_from_cookie(self.headers.get('Cookie')))
         return self.send(*html_response(
             self.pg_change_password(success=True, msg='Password updated.')))
 

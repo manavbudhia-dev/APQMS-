@@ -24,7 +24,7 @@ import json
 import re
 from datetime import datetime, timezone
 
-from database import gen_quotation_no, get_db
+from database import gen_quotation_no, get_db, begin_immediate
 from app.ocr import engine, service
 from app.views.quotation_pages import QuotationNumberConflictError, QuotationSaveError
 from utils.http_utils import (FormData, UploadedFile, consume_csrf_token, esc, file_response,
@@ -570,6 +570,21 @@ class OcrPagesMixin:
             if customer_id is not None and not db.execute(
                     "SELECT 1 FROM customers WHERE id=?", (customer_id,)).fetchone():
                 return problem('That customer no longer exists — pick another.')
+
+            # Everything from here on creates rows, so take the write lock
+            # *before* asking the database whether this scan has been
+            # quoted yet. Two reviewers — or one reviewer pressing the
+            # button twice — otherwise both read "not quoted", both create a
+            # quotation, and the second UPDATE at the end re-links the
+            # document, orphaning the first quotation with nobody able to
+            # find it from the scan.
+            begin_immediate(db)
+            if db.execute("SELECT 1 FROM ocr_documents WHERE id=? AND quotation_id IS NOT NULL",
+                          (doc_id,)).fetchone():
+                db.rollback()
+                return problem('A quotation has already been created from this scan — '
+                               'edit that quotation instead of making another.')
+
             if choice == 'new':
                 customer_id = db.execute(
                     "INSERT INTO customers (contact_person, company_name, address, phone, email, gstin) "

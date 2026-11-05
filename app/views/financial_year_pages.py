@@ -6,9 +6,13 @@ from database import get_or_create_financial_year
 
 def _safe_next(form):
     """Only ever redirect back to a path on this site — never to an
-    attacker-supplied absolute/protocol-relative URL."""
+    attacker-supplied absolute/protocol-relative URL.
+
+    `//evil.com` is the obvious attempt, but `/\\evil.com` works just as
+    well: browsers normalise the backslash and treat it as protocol-relative
+    too, so checking only for a leading `//` left the bypass open."""
     next_url = (form.get('next') or '').strip()
-    if not next_url or not next_url.startswith('/') or next_url.startswith('//'):
+    if not next_url.startswith('/') or next_url[1:2] in ('/', '\\'):
         return '/dashboard'
     return next_url
 

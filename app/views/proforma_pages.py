@@ -1,15 +1,14 @@
 import json
 import math
-import random
-import sqlite3
-import time
 from utils.http_utils import esc
 from utils.http_utils import esc_nl
 from utils.http_utils import fmt_rupee
 from utils.http_utils import redirect
 from utils.http_utils import pdf_response
+from utils.http_utils import json_for_script
 from database import get_db
 from database import gen_proforma_no
+from database import insert_with_generated_no, DocumentNumberConflictError
 from app.generators.proforma_generator import build_proforma_pdf
 from utils.dates import date_in_fy
 from datetime import datetime
@@ -44,30 +43,23 @@ class ProformaPagesMixin:
             (pi_no,order_no,order_date,date,customer_id,subject,terms,
             status,notes,created_by) order.
 
-        A short randomized backoff runs between attempts (instead of
-        retrying in a tight loop) so a second colliding request is
-        unlikely to still be mid-transaction by the time we retry.
-        Returns (new_row_id, pi_no). Raises ProformaNumberConflictError
-        — never lets the underlying sqlite3.IntegrityError bubble up —
-        if every attempt collides."""
-        max_attempts = max_attempts or self.PNO_MAX_ATTEMPTS
-        last_err = None
-        for attempt in range(max_attempts):
-            pno = pno_fn()
-            try:
-                cur = db.execute(
-                    "INSERT INTO proforma_invoices "
-                    "(pi_no,order_no,order_date,date,customer_id,subject,terms,status,notes,created_by) "
-                    "VALUES (?,?,?,?,?,?,?,?,?,?)",
-                    values_fn(pno))
-                return cur.lastrowid, pno
-            except sqlite3.IntegrityError as e:
-                last_err = e
-                if attempt < max_attempts - 1:
-                    time.sleep(random.uniform(0.02, 0.08) * (attempt + 1))
-        raise ProformaNumberConflictError(
-            f'Could not generate a unique PI number after '
-            f'{max_attempts} attempts') from last_err
+        The read of MAX(pi_no) and the INSERT run inside one IMMEDIATE
+        transaction (see database.insert_with_generated_no), so the write
+        lock is held from before the read and a concurrent request cannot
+        claim the same number in between. Returns (new_row_id, pi_no) with
+        that transaction still open, so the caller can add the line items
+        and commit the whole invoice as one unit. Raises
+        ProformaNumberConflictError — never lets the underlying sqlite3
+        error bubble up — if every attempt collides."""
+        try:
+            return insert_with_generated_no(
+                db,
+                "INSERT INTO proforma_invoices "
+                "(pi_no,order_no,order_date,date,customer_id,subject,terms,status,notes,created_by) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?)",
+                pno_fn, values_fn, max_attempts or self.PNO_MAX_ATTEMPTS)
+        except DocumentNumberConflictError as e:
+            raise ProformaNumberConflictError(str(e)) from e
 
     def handle_proforma_create(self, form, user_id):
         db = get_db()
@@ -642,7 +634,7 @@ class ProformaPagesMixin:
 <script>
 (function() {{
   var state = {{
-    q: {json.dumps(q)}, status: {json.dumps(status)},
+    q: {json_for_script(q)}, status: {json_for_script(status)},
     page: {frag["page"]}, pageSize: {frag["page_size"]}
   }};
   var debounceTimer = null;

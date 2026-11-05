@@ -6,6 +6,7 @@ from utils.http_utils import esc_nl
 from utils.http_utils import fmt_rupee
 from utils.http_utils import redirect
 from utils.http_utils import json_response
+from utils.http_utils import json_for_script
 from database import get_db
 
 # Matches **bold text** so it can be rendered as <strong> wherever a
@@ -811,8 +812,8 @@ function toggleDescPreview(btn) {{
 
 (function() {{
   var state = {{
-    q: {json.dumps(q)}, page: {frag["page"]}, sort: {json.dumps(sort)}, dir: {json.dumps(direction)},
-    type: {json.dumps(type_filter)}, units: [], rateMin: '', rateMax: '', pageSize: {frag["page_size"]}
+    q: {json_for_script(q)}, page: {frag["page"]}, sort: {json_for_script(sort)}, dir: {json_for_script(direction)},
+    type: {json_for_script(type_filter)}, units: [], rateMin: '', rateMax: '', pageSize: {frag["page_size"]}
   }};
   var debounceTimer = null;
   var selected = new Set();

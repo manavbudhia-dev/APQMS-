@@ -4,8 +4,10 @@ from utils.http_utils import esc
 from utils.http_utils import esc_nl
 from utils.http_utils import redirect
 from utils.http_utils import pdf_response
+from utils.http_utils import json_for_script
 from database import get_db
 from database import gen_packing_list_no
+from database import insert_with_generated_no, DocumentNumberConflictError
 from utils.dates import date_in_fy
 from datetime import datetime
 
@@ -369,7 +371,7 @@ class PackingPagesMixin:
 <script>
 (function() {{
   var state = {{
-    q: {json.dumps(q)}, status: {json.dumps(status)},
+    q: {json_for_script(q)}, status: {json_for_script(status)},
     page: {frag["page"]}, pageSize: {frag["page_size"]}
   }};
   var debounceTimer = null;
@@ -908,7 +910,6 @@ function submitFormPL() {
 
     def handle_packing_create(self, form, user_id):
         db = get_db()
-        plno = gen_packing_list_no(db)
         date = form.get('date', datetime.now().strftime('%d - %m - %Y'))
         try:
             customer_id = int(form.get('customer_id')) if form.get('customer_id') else None
@@ -918,37 +919,57 @@ function submitFormPL() {
             pi_id = int(form.get('pi_id')) if form.get('pi_id') else None
         except (TypeError, ValueError):
             pi_id = None
-        cur = db.execute(
-            "INSERT INTO packing_lists "
-            "(pl_no,pi_id,date,customer_id,subject,status,notes,created_by) "
-            "VALUES (?,?,?,?,?,?,?,?)",
-            (plno, pi_id, date, customer_id, form.get('subject', ''),
-             'Draft', form.get('notes', ''), user_id))
-        plid = cur.lastrowid
 
-        item_ids = form.getlist('item_id[]')
-        quantities = form.getlist('quantity[]')
-        bag_qtys = form.getlist('bag_qty[]')
-        for i, (iid, qty, bagq) in enumerate(zip(item_ids, quantities, bag_qtys)):
-            if not iid or not qty:
-                continue
-            try:
-                iid = int(iid)
-                qty = float(qty)
-                bagq = float(bagq) if bagq else qty
-            except (TypeError, ValueError):
-                continue
-            item = db.execute("SELECT * FROM items WHERE id=?", (iid,)).fetchone()
-            if item:
-                db.execute(
-                    "INSERT INTO packing_list_items "
-                    "(packing_list_id,item_id,item_name,description,specification,"
-                    "total_qty,unit,bag_qty,sort_order) "
-                    "VALUES (?,?,?,?,?,?,?,?,?)",
-                    (plid, iid, item['item_name'], item['description'],
-                     item['specification'], qty, item['unit'], bagq, i))
-        db.commit()
-        db.close()
+        try:
+            # pl_no is UNIQUE and derived from MAX(pl_no), so two packing
+            # lists created at the same moment would otherwise both be
+            # handed the same number and one INSERT would fail with an
+            # unhandled IntegrityError — a 500, with nothing saved and the
+            # connection leaked. Same transactional generate-and-insert the
+            # quotation and proforma modules use.
+            plid, _ = insert_with_generated_no(
+                db,
+                "INSERT INTO packing_lists "
+                "(pl_no,pi_id,date,customer_id,subject,status,notes,created_by) "
+                "VALUES (?,?,?,?,?,?,?,?)",
+                lambda: gen_packing_list_no(db),
+                lambda plno: (plno, pi_id, date, customer_id, form.get('subject', ''),
+                              'Draft', form.get('notes', ''), user_id))
+        except DocumentNumberConflictError:
+            db.rollback()
+            db.close()
+            return self._render_save_error(
+                'Another packing list was being created at the exact same '
+                'moment, so a unique packing list number could not be '
+                'generated. Nothing was saved &mdash; please try '
+                'submitting again.',
+                '/packing/new', active='packing')
+
+        try:
+            item_ids = form.getlist('item_id[]')
+            quantities = form.getlist('quantity[]')
+            bag_qtys = form.getlist('bag_qty[]')
+            for i, (iid, qty, bagq) in enumerate(zip(item_ids, quantities, bag_qtys)):
+                if not iid or not qty:
+                    continue
+                try:
+                    iid = int(iid)
+                    qty = float(qty)
+                    bagq = float(bagq) if bagq else qty
+                except (TypeError, ValueError):
+                    continue
+                item = db.execute("SELECT * FROM items WHERE id=?", (iid,)).fetchone()
+                if item:
+                    db.execute(
+                        "INSERT INTO packing_list_items "
+                        "(packing_list_id,item_id,item_name,description,specification,"
+                        "total_qty,unit,bag_qty,sort_order) "
+                        "VALUES (?,?,?,?,?,?,?,?,?)",
+                        (plid, iid, item['item_name'], item['description'],
+                         item['specification'], qty, item['unit'], bagq, i))
+            db.commit()
+        finally:
+            db.close()
         return self.send(*redirect(f'/packing/{plid}'))
 
 

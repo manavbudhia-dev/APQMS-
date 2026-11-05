@@ -28,10 +28,14 @@ import time
 import types
 
 from app.config import BASE
+from utils.http_utils import _atomic_write_private
 
 CACHE_DIR = os.path.join(BASE, 'app', 'ml', '_cache')
 MIN_REFRESH_INTERVAL_SECONDS = 30  # basic anti-hammering guard on the
                                     # admin-triggered retrain endpoint
+_REFRESH_SLOT_FILE = os.path.join(CACHE_DIR, 'refresh.lock')
+REFRESH_SLOT_STALE_SECONDS = 10 * 60  # a retrain never legitimately takes
+                                      # this long, so the slot is reclaimable
 
 
 class MLUnavailableError(RuntimeError):
@@ -101,19 +105,7 @@ def save_cache(name, data):
     in principle mention business figures (revenue, salary anomalies)
     that shouldn't be left world-readable on shared hosting either."""
     os.makedirs(CACHE_DIR, exist_ok=True)
-    path = _cache_path(name)
-    tmp_path = path + '.tmp'
-    fd = os.open(tmp_path, os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o600)
-    try:
-        with os.fdopen(fd, 'w', encoding='utf-8') as f:
-            json.dump(data, f)
-    except BaseException:
-        try:
-            os.remove(tmp_path)
-        except OSError:
-            pass
-        raise
-    os.replace(tmp_path, path)
+    _atomic_write_private(_cache_path(name), lambda f: json.dump(data, f))
 
 
 def seconds_since_last_refresh():
@@ -127,6 +119,49 @@ def seconds_since_last_refresh():
     if latest is None:
         return None
     return time.time() - latest
+
+
+def claim_refresh_slot():
+    """Take the "one retrain at a time" slot, or say it's already taken.
+
+    `seconds_since_last_refresh()` is only a rate limit, and it was checked
+    against the *previous* run's timestamp: two admins pressing Refresh
+    together both saw "more than 30s ago" and both then trained and wrote
+    the same three caches. Creating this file with O_EXCL is the one
+    primitive that makes "is anyone else inside the critical section right
+    now?" a single atomic question, across processes as well as threads.
+
+    A slot left behind by a process that died mid-train would block
+    refreshing forever, so one older than REFRESH_SLOT_STALE_SECONDS is
+    reclaimed rather than honoured."""
+    os.makedirs(CACHE_DIR, exist_ok=True)
+    for attempt in (0, 1):
+        try:
+            fd = os.open(_REFRESH_SLOT_FILE,
+                         os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        except FileExistsError:
+            if attempt:
+                return False
+            try:
+                if (time.time() - os.path.getmtime(_REFRESH_SLOT_FILE)
+                        > REFRESH_SLOT_STALE_SECONDS):
+                    os.remove(_REFRESH_SLOT_FILE)
+            except OSError:
+                pass
+            continue
+        try:
+            os.write(fd, str(os.getpid()).encode())
+        finally:
+            os.close(fd)
+        return True
+    return False
+
+
+def release_refresh_slot():
+    try:
+        os.remove(_REFRESH_SLOT_FILE)
+    except OSError:
+        pass
 
 
 def sklearn_available():
