@@ -1085,3 +1085,296 @@ textarea.form-control {
   .pl-row .pl-btn { width: 100%; }
   .pl-step { padding: 14px; gap: 10px; }
 }
+
+
+/* ═══════════════════════════════════════════════════════════════
+   MICRO-INTERACTION LAYER
+   Hover / press / focus motion for the whole app, plus the tooltip
+   skin. Appended last so it reads as a polish pass on top of the
+   component rules above rather than a rewrite of them: it changes
+   motion, shadows and small transforms only — never layout,
+   spacing, sizes or colours a page depends on.
+   Two safety rails sit at the bottom: `@media (hover: hover)` keeps
+   mouse-only states off touch devices (where a tap would otherwise
+   leave a row or card stuck "hovered"), and
+   `prefers-reduced-motion` turns the whole layer off.
+   ═══════════════════════════════════════════════════════════════ */
+:root {
+  --ui-ease: cubic-bezier(.22, .61, .36, 1);
+  --ui-spring: cubic-bezier(.34, 1.45, .64, 1);
+  --ui-fast: 110ms;
+  --ui-med: 190ms;
+  --ui-slow: 300ms;
+}
+
+/* One motion rhythm for every control, so a click anywhere in the
+   app feels like the same app. Explicit properties rather than
+   `all`, because these elements carry inline width/height changes in
+   the responsive blocks above and `transition: all` animates those
+   into a visible squish. Plain class selectors, not :where():
+   Bootstrap's own `.btn` and `.form-control` transitions are the same
+   specificity and this sheet is linked after it, so this one wins. */
+.btn, .pl-btn, .row-action-btn, .icon-btn-sm, .table-icon-btn, .qm-btn,
+.topbar-icon-btn, .cm-icon-btn, .cm-page-btn, .cm-select-btn, .fy-switcher-btn,
+.avatar-chip, .btn-logout, .sidebar-nav li a, .dropdown-item, .global-search-item,
+.notif-item, .fy-option, .badge, .cm-status, .type-tab, .q-chip,
+.form-control, .form-select, .pl-input, .summary-box, .cm-tip {
+  transition: background-color var(--ui-med) var(--ui-ease),
+              border-color var(--ui-med) var(--ui-ease),
+              color var(--ui-med) var(--ui-ease),
+              box-shadow var(--ui-med) var(--ui-ease),
+              opacity var(--ui-med) var(--ui-ease),
+              transform var(--ui-fast) var(--ui-spring);
+}
+/* Radios and switches draw their tick with background-position, so
+   this one keeps Bootstrap's list and only adds the press bounce. */
+.form-check-input {
+  transition: background-position var(--ui-med) var(--ui-ease),
+              border-color var(--ui-med) var(--ui-ease),
+              box-shadow var(--ui-med) var(--ui-ease),
+              transform var(--ui-fast) var(--ui-spring);
+}
+
+/* Keyboard focus, deliberately separate from mouse focus so tabbing
+   through a form shows a ring while a plain click does not. */
+:where(a, button, input, select, textarea, [tabindex]):focus-visible {
+  outline: 2px solid var(--primary-light);
+  outline-offset: 2px;
+}
+:where(.sidebar-nav a, .btn-logout, .dropdown-item, .global-search-item,
+       .notif-item, .fy-option, .cm-page-btn):focus-visible { outline-offset: -2px; }
+:where(button, a) { -webkit-tap-highlight-color: transparent; }
+::selection { background: rgba(220, 38, 38, .13); }
+
+/* ── BUTTONS: lift, sheen, press ── */
+:where(.btn:not(.btn-close), .pl-btn) { position: relative; }
+.btn-primary:not(:disabled), .pl-btn-red, .pl-btn-green {
+  overflow: hidden;
+}
+.btn-primary:not(:disabled)::before,
+.pl-btn-red::before, .pl-btn-green::before {
+  content: ''; position: absolute; top: 0; left: 0; width: 55%; height: 100%;
+  background: linear-gradient(100deg, transparent, rgba(255, 255, 255, .3), transparent);
+  transform: translateX(-190%); pointer-events: none;
+}
+@media (hover: hover) {
+  .btn-primary:not(:disabled):hover::before,
+  .pl-btn-red:hover::before, .pl-btn-green:hover::before { animation: ui-sheen var(--ui-slow) var(--ui-ease); }
+  .btn:not(.btn-close):not(:disabled):hover, .pl-btn:hover { transform: translateY(-1px); }
+}
+:where(.btn, .pl-btn):active:not(:disabled) { transform: translateY(1px) scale(.985); }
+:where(.btn, .pl-btn):disabled { transform: none; box-shadow: none; }
+.btn > .bi:first-child, .pl-btn > .bi:first-child { transition: transform var(--ui-med) var(--ui-spring); }
+@media (hover: hover) {
+  .btn:not(:disabled):hover > .bi:first-child, .pl-btn:hover > .bi:first-child { transform: scale(1.14); }
+}
+
+/* Small square icon buttons get the press feedback the icon-only
+   controls most need — the shape says "this is a button". */
+@media (hover: hover) {
+  .row-action-btn:hover, .icon-btn-sm:hover, .table-icon-btn:hover, .qm-btn:hover,
+  .topbar-icon-btn:hover, .cm-icon-btn:hover { transform: translateY(-1px); }
+  .row-action-btn:hover .bi, .icon-btn-sm:hover .bi, .cm-icon-btn:hover .bi { transform: translateY(-1px) scale(1.1); }
+  .row-action-btn.ra-pdf:hover .bi { transform: translateY(1px); }
+  .row-action-btn.ra-edit:hover .bi { transform: translateX(1px) rotate(-8deg); }
+  .row-action-btn.ra-delete:hover .bi { transform: rotate(-10deg) scale(1.08); }
+}
+.row-action-btn:active, .icon-btn-sm:active, .table-icon-btn:active, .qm-btn:active,
+.cm-icon-btn:active, .topbar-icon-btn:active { transform: scale(.9); }
+.topbar-icon-btn:hover .bi-bell { animation: ui-ring 700ms var(--ui-ease); }
+.notif-badge { animation: ui-badge-pop var(--ui-slow) var(--ui-spring) 400ms backwards; }
+
+/* ── NAVIGATION: sidebar, dropdowns, search results, breadcrumbs ── */
+.sidebar-nav li a { position: relative; }
+.sidebar-nav li a::before {
+  content: ''; position: absolute; left: 4px; top: 50%; width: 3px; height: 0;
+  border-radius: 3px; background: rgba(255, 255, 255, .9);
+  transform: translateY(-50%);
+  transition: height var(--ui-med) var(--ui-spring);
+}
+.sidebar-nav li a.active::before { height: 17px; }
+.sidebar-nav li a i { transition: transform var(--ui-med) var(--ui-spring); }
+@media (hover: hover) {
+  .sidebar-nav li a:hover i { transform: translateX(2px); }
+}
+.sidebar-nav::-webkit-scrollbar { width: 5px; }
+.sidebar-nav::-webkit-scrollbar-thumb { background: rgba(255, 255, 255, .18); border-radius: 3px; }
+.brand-icon { transition: transform var(--ui-med) var(--ui-spring), box-shadow var(--ui-med); }
+.sidebar-brand:hover .brand-icon { transform: rotate(-8deg) scale(1.06); }
+.btn-logout:hover > .bi { animation: ui-nudge-x var(--ui-slow) var(--ui-ease); }
+
+/* Menus arrive instead of appearing. `translate` rather than
+   `transform` because Popper writes an inline transform onto every
+   dropdown for positioning — animating that same property would
+   override it mid-flight and the menu would land in the wrong place. */
+.dropdown-menu.show { animation: ui-menu-in var(--ui-med) var(--ui-ease) backwards; }
+@media (hover: hover) {
+  .dropdown-menu .dropdown-item:hover,
+  .global-search-item:hover, .notif-item:hover, .fy-option:hover,
+  .cm-dd-item:hover { transform: translateX(2px); }
+  .global-search-item:hover .gs-icon, .notif-item:hover > .bi { transform: scale(1.08); }
+}
+.global-search-item .gs-icon, .notif-item > i, .cm-dd-item {
+  transition: transform var(--ui-med) var(--ui-spring), background-color var(--ui-med), color var(--ui-med);
+}
+.cm-breadcrumb:hover .bi-chevron-right, .topbar-crumbs:hover .bi-chevron-right,
+.att-breadcrumb:hover .bi, .aemp-breadcrumb:hover .bi { transform: translateX(2px); }
+:where(.cm-breadcrumb, .topbar-crumbs, .att-breadcrumb, .aemp-breadcrumb) .bi {
+  transition: transform var(--ui-med) var(--ui-ease);
+}
+.avatar-circle, .fy-switcher-btn > i { transition: transform var(--ui-med) var(--ui-spring); }
+.fy-switcher-btn:hover > .bi-calendar-range, .avatar-chip:hover .avatar-circle { transform: rotate(-6deg); }
+.fy-switcher-btn[aria-expanded="true"] > .bi-chevron-down { transform: rotate(180deg); }
+.avatar-chip:active { transform: scale(.97); }
+
+/* ── TABLES: the row answers, then the actions come forward ── */
+.table-card table tbody tr, .cm-table tbody tr {
+  transition: background-color var(--ui-fast) linear, box-shadow var(--ui-med) var(--ui-ease);
+}
+@media (hover: hover) {
+  .table-card table tbody tr:hover > td:first-child,
+  .cm-table tbody tr:hover > td:first-child { box-shadow: inset 3px 0 0 var(--primary-light); }
+  .table-card table tbody tr:hover .badge, .cm-table tbody tr:hover .cm-status { transform: translateY(-1px); }
+}
+.table-card table tbody tr .row-action-btn, .table-card table tbody tr .cm-icon-btn,
+.table-card table tbody tr .table-icon-btn { opacity: .68; }
+.table-card table tbody tr:hover .row-action-btn,
+.table-card table tbody tr:focus-within .row-action-btn,
+.table-card table tbody tr:hover .cm-icon-btn,
+.table-card table tbody tr:focus-within .cm-icon-btn,
+.table-card table tbody tr:hover .table-icon-btn,
+.table-card table tbody tr:focus-within .table-icon-btn,
+.cm-table tbody tr:hover .cm-icon-btn { opacity: 1; }
+.sortable-th { transition: color var(--ui-med), background-color var(--ui-med); }
+.sortable-th:hover { background: #EEF2F7; }
+.sortable-th:active { transform: scale(.99); }
+.cm-loading, #itemsBody, #customersBody, #quotationsTbody, #packingTbody {
+  transition: opacity var(--ui-med) var(--ui-ease);
+}
+
+/* ── CARDS & TILES ── */
+@media (hover: hover) {
+  .stat-card:hover { transform: translateY(-2px); box-shadow: var(--shadow-md); border-color: #CBD5E1; }
+  .stat-card:hover .stat-icon { transform: scale(1.08) rotate(-4deg); }
+  .stat-card:hover .stat-value { color: var(--primary-dark); }
+  .stat-icon, .metric-figure, .cm-stat-icon { transition: transform var(--ui-med) var(--ui-spring), color var(--ui-med); }
+  .cm-stat:hover { transform: translateY(-2px); box-shadow: var(--shadow-md); }
+  .cm-stat:hover .cm-stat-icon { transform: scale(1.06) rotate(-4deg); }
+  .promo-card:hover { transform: translateY(-3px); box-shadow: var(--shadow-lg); }
+  .promo-card:hover .promo-icon { transform: translateY(-2px) rotate(-8deg); }
+  .promo-icon { transition: transform var(--ui-slow) var(--ui-spring); }
+  .pl-tile:hover { transform: translateY(-2px); box-shadow: 0 4px 12px rgba(220, 38, 38, .1); }
+  .pl-card:hover .pl-num { background: var(--primary); color: #fff; transform: scale(1.05); }
+  .pl-num { transition: background-color var(--ui-med), color var(--ui-med), transform var(--ui-med) var(--ui-spring); }
+  .summary-box:hover { border-color: #CBD5E1; box-shadow: var(--shadow-sm); }
+  .metric-figure:hover { transform: translateY(-1px); }
+  .donut-canvas-wrap:hover .donut-center strong { transform: scale(1.06); }
+  .donut-center strong { display: inline-block; transition: transform var(--ui-med) var(--ui-spring); }
+}
+.quotation-item-row:hover > .item-name { color: var(--primary-dark); }
+.quotation-item-row .item-name { transition: color var(--ui-med); }
+.empty-state i { animation: ui-float 3.4s var(--ui-ease) infinite; }
+.status-dot-sent { animation: ui-pulse-dot 2.8s var(--ui-ease) infinite; }
+
+/* ── FORMS ── */
+@media (hover: hover) {
+  .form-control:hover:not(:focus), .form-select:hover:not(:focus),
+  .pl-input:hover:not(:focus), .cm-search:hover { border-color: #94A3B8; }
+}
+.field-icon-wrap > .field-icon { transition: color var(--ui-med), transform var(--ui-med) var(--ui-spring); }
+.field-icon-wrap:focus-within > .field-icon { color: var(--primary); transform: scale(1.08); }
+.pl-field > i { transition: color var(--ui-med), transform var(--ui-med) var(--ui-spring); }
+.pl-field:focus-within > i { color: var(--primary); transform: scale(1.08); }
+.form-check-input:active { transform: scale(.88); }
+.form-check-input:checked { animation: ui-pop var(--ui-med) var(--ui-spring); }
+.cm-select-btn[aria-expanded="true"] > .cm-caret { transform: rotate(180deg); }
+.cm-caret { transition: transform var(--ui-med) var(--ui-ease); }
+
+/* ── PAGINATION / CHIPS / TABS ── */
+@media (hover: hover) {
+  .cm-page-btn:not(:disabled):not(.active):hover { transform: translateY(-2px); box-shadow: var(--shadow-sm); }
+  .cm-page-btn.active:hover { transform: none; }
+  .type-tab:hover, .q-chip:hover { transform: translateY(-1px); }
+}
+.cm-page-btn:not(:disabled):active, .type-tab:active, .q-chip:active { transform: scale(.94); }
+.cm-page-btn:disabled { transform: none; }
+
+/* ── DASHBOARD / LOGIN / METRICS ENTRY ──────────────────────────
+   Staggered rise for the blocks a page opens with, so the first
+   paint lands in order instead of all at once. `backwards` (not
+   `both`) on purpose: the finished state must not keep a transform
+   on a grid column, or absolutely-positioned children inside it —
+   dropdown menus, date pickers — would anchor to the wrong box. */
+.content-area > .row > [class*="col-"],
+.content-area > .row,
+.content-area > .dash-greeting,
+.content-area > .pl-head,
+.content-area > .cm-header,
+.content-area > .page-head {
+  animation: ui-rise var(--ui-slow) var(--ui-ease) backwards;
+}
+.content-area > .row > [class*="col-"]:nth-child(2) { animation-delay: 60ms; }
+.content-area > .row > [class*="col-"]:nth-child(3) { animation-delay: 120ms; }
+.content-area > .row > [class*="col-"]:nth-child(4) { animation-delay: 180ms; }
+.content-area > .row + .row { animation-delay: 200ms; }
+.content-area > .dash-greeting + .row { animation-delay: 120ms; }
+.content-area > .dash-greeting + .row + .row { animation-delay: 260ms; }
+.login-card { animation: ui-card-in 420ms var(--ui-ease) backwards; }
+.login-card .brand { animation: ui-rise var(--ui-slow) var(--ui-ease) backwards; animation-delay: 120ms; }
+.login-card form { animation: ui-rise var(--ui-slow) var(--ui-ease) backwards; animation-delay: 220ms; }
+.login-card .alert { animation: ui-shake 420ms var(--ui-ease); }
+.login-card .brand-icon { animation: ui-pop 460ms var(--ui-spring) backwards; animation-delay: 60ms; }
+/* The ambient wash behind the login card drifts very slowly; it is the
+   only continuous motion in the layer, and reduced motion stops it. */
+.login-page::before { animation: ui-drift 26s ease-in-out infinite alternate; }
+
+/* ── TOOLTIP SKIN (styled title="…" bubbles) ───────────────────
+   Bootstrap's tooltip is initialised over the existing title
+   attributes in the shared layout, so this is only the look of the
+   bubble it injects. */
+.tooltip { --bs-tooltip-bg: #0F172A; --bs-tooltip-color: #F8FAFC; z-index: 1080; }
+.tooltip .tooltip-inner {
+  font-size: 12px; font-weight: 500; line-height: 1.4; letter-spacing: .1px;
+  padding: 6px 11px; border-radius: 8px; box-shadow: var(--shadow-md);
+  max-width: 260px; text-align: center;
+}
+.tooltip.bs-tooltip-top .tooltip-arrow::before { border-top-color: #0F172A; }
+.tooltip.bs-tooltip-bottom .tooltip-arrow::before { border-bottom-color: #0F172A; }
+.tooltip.bs-tooltip-start .tooltip-arrow::before { border-left-color: #0F172A; }
+.tooltip.bs-tooltip-end .tooltip-arrow::before { border-right-color: #0F172A; }
+
+/* ── KEYFRAMES ── */
+@keyframes ui-rise { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: none; } }
+@keyframes ui-card-in { from { opacity: 0; transform: translateY(16px) scale(.97); } to { opacity: 1; transform: none; } }
+@keyframes ui-menu-in { from { opacity: 0; translate: 0 -5px; } to { opacity: 1; translate: 0 0; } }
+@keyframes ui-pop { from { transform: scale(.82); } to { transform: scale(1); } }
+@keyframes ui-badge-pop { from { transform: scale(0); } to { transform: scale(1); } }
+@keyframes ui-sheen { to { transform: translateX(330%); } }
+@keyframes ui-ring { 0%, 100% { transform: none; } 25% { transform: rotate(12deg); } 55% { transform: rotate(-9deg); } 78% { transform: rotate(4deg); } }
+@keyframes ui-nudge-x { 0%, 100% { transform: none; } 50% { transform: translateX(3px); } }
+@keyframes ui-float { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-4px); } }
+@keyframes ui-pulse-dot { 0%, 72%, 100% { box-shadow: 0 0 0 0 rgba(59, 130, 246, .45); } 36% { box-shadow: 0 0 0 5px rgba(59, 130, 246, 0); } }
+@keyframes ui-shake { 0%, 100% { transform: none; } 22% { transform: translateX(-5px); } 45% { transform: translateX(4px); } 70% { transform: translateX(-2px); } }
+@keyframes ui-drift { from { transform: translate3d(-2%, -1%, 0) scale(1); } to { transform: translate3d(2%, 2%, 0) scale(1.05); } }
+
+/* ── SAFETY RAILS ── */
+@media (hover: none) {
+  .table-card table tbody tr .row-action-btn,
+  .table-card table tbody tr .cm-icon-btn,
+  .table-card table tbody tr .table-icon-btn,
+  .cm-table tbody tr .cm-icon-btn { opacity: 1; }
+}
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: .01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: .01ms !important;
+    scroll-behavior: auto !important;
+  }
+  .empty-state i, .status-dot-sent, .login-page::before { animation: none !important; }
+}
+@media print {
+  .content-area > .row, .content-area > .row > [class*="col-"],
+  .content-area > .dash-greeting, .login-card { animation: none !important; }
+  .tooltip { display: none !important; }
+}

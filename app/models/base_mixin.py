@@ -263,7 +263,7 @@ class BaseMixin:
 <title>{title} - Aypee Quotation System</title>
 <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
 <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.0/font/bootstrap-icons.css" rel="stylesheet">
-<link href="/static/css/style.css" rel="stylesheet">
+<link href="/static/css/style.css?v=ui1" rel="stylesheet">
 </head>
 <body>
 <div class="d-flex">
@@ -522,6 +522,65 @@ document.addEventListener('keydown', function (e) {{
       panel.classList.add('d-none');
     }}
   }});
+}})();
+
+/* ── STYLED TOOLTIPS over the existing title="…" text ──────────
+   Every icon-only control in the app already carries a plain
+   title (Save, Delete, the row menu, the bell…). Bootstrap's
+   tooltip — from the bundle loaded above, so no new script —
+   renders that same text in a styled bubble and removes the
+   attribute while doing it, so the browser's own grey box can't
+   appear alongside ours.
+
+   Attached on first hover rather than in one pass over the page at
+   load, because the list pages re-render their table bodies from
+   fetch() after every search or filter keystroke: a row that
+   appears later gets its tooltip the same way. Text only (never
+   HTML), so a customer or item name can't become markup here. */
+(function() {{
+  if (!window.bootstrap || !bootstrap.Tooltip) return;
+  var reduce = !!(window.matchMedia && matchMedia('(prefers-reduced-motion: reduce)').matches);
+  var SKIP = {{ INPUT: 1, TEXTAREA: 1, SELECT: 1 }};   // a bubble over a field you are typing in
+  var live = [];
+
+  function attach(el) {{
+    var record = {{ el: el }};
+    record.tip = new bootstrap.Tooltip(el, {{
+      container: 'body',                     // clear of overflow:hidden wrappers
+      animation: !reduce,
+      delay: {{ show: reduce ? 0 : 200, hide: 80 }},
+      trigger: 'hover focus'
+    }});
+    live.push(record);
+  }}
+
+  function onEnter(e) {{
+    var el = e.target && e.target.closest ? e.target.closest('[title]') : null;
+    if (!el || SKIP[el.tagName] || el.dataset.uiTip) return;
+    if (!(el.getAttribute('title') || '').trim()) return;
+    el.dataset.uiTip = '1';
+    attach(el);
+  }}
+
+  document.addEventListener('mouseover', onEnter, true);
+  document.addEventListener('focusin', onEnter, true);
+
+  // A tooltip whose control has been thrown away by a re-render would
+  // otherwise hang in the page forever, so prune those on DOM changes.
+  var queued = false;
+  function prune() {{
+    for (var i = live.length - 1; i >= 0; i--) {{
+      if (!document.body.contains(live[i].el)) {{
+        live[i].tip.dispose();
+        live.splice(i, 1);
+      }}
+    }}
+  }}
+  new MutationObserver(function() {{
+    if (queued) return;
+    queued = true;
+    requestAnimationFrame(function() {{ queued = false; prune(); }});
+  }}).observe(document.body, {{ childList: true, subtree: true }});
 }})();
 </script>
 </body>

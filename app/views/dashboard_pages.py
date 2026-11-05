@@ -567,6 +567,44 @@ class DashboardPagesMixin:
     }}
   }}
 }})();
+
+/* ── KPI COUNT-UP ─────────────────────────────────────────────
+   The headline numbers are the first thing you read here, so they
+   tick up from zero once instead of arriving already finished —
+   the same beat Chart.js gives the two graphs. Only a cell whose
+   entire text is a plain integer is animated: the Rs. revenue
+   figure keeps its Indian digit grouping from the server, and
+   rewriting that here would risk corrupting it, so it gets the
+   entrance rise in the stylesheet instead. */
+(function() {{
+  if (window.matchMedia && matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+  var jobs = [];
+  Array.prototype.forEach.call(document.querySelectorAll('.stat-value, .donut-center strong'), function(el) {{
+    var raw = (el.textContent || '').trim();
+    if (!/^\\d+$/.test(raw)) return;
+    var target = parseInt(raw, 10);
+    if (target < 2) return;   // nothing to count through for 0 and 1
+    el.textContent = '0';
+    jobs.push({{ el: el, target: target }});
+  }});
+  if (!jobs.length) return;
+  function finish() {{ jobs.forEach(function(j) {{ j.el.textContent = String(j.target); }}); }}
+  // A tab nobody is looking at gets no animation frames at all, so the
+  // numbers must not depend on one: start the count only when the page
+  // is actually on screen, and always land on the real value.
+  if (document.hidden) {{ finish(); return; }}
+  var started = null;
+  var DURATION = 700;
+  setTimeout(finish, DURATION + 400);   // backstop if the frames stop coming
+  function step(now) {{
+    if (started === null) started = now;
+    var p = Math.min(1, (now - started) / DURATION);
+    var eased = 1 - Math.pow(1 - p, 3);
+    jobs.forEach(function(j) {{ j.el.textContent = String(Math.round(j.target * eased)); }});
+    if (p < 1) {{ requestAnimationFrame(step); }} else {{ finish(); }}
+  }}
+  requestAnimationFrame(step);
+}})();
 </script>'''
         return self._layout('Dashboard', 'Dashboard', content, 'dashboard')
 
