@@ -195,7 +195,7 @@ class AuthPagesMixin:
 <title>Login - Aypee Quotation System</title>
 <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
 <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.0/font/bootstrap-icons.css" rel="stylesheet">
-<link href="/static/css/style.css?v=ui1" rel="stylesheet">
+<link href="/static/css/style.css?v=ui2" rel="stylesheet">
 </head>
 <body>
 <div class="login-page">
@@ -248,7 +248,7 @@ class AuthPagesMixin:
 <title>Add User - Aypee Quotation System</title>
 <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
 <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.0/font/bootstrap-icons.css" rel="stylesheet">
-<link href="/static/css/style.css?v=ui1" rel="stylesheet">
+<link href="/static/css/style.css?v=ui2" rel="stylesheet">
 </head>
 <body>
 <div class="login-page">
@@ -326,7 +326,7 @@ function generatePassword() {{
 <title>Change Password - Aypee Quotation System</title>
 <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
 <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.0/font/bootstrap-icons.css" rel="stylesheet">
-<link href="/static/css/style.css?v=ui1" rel="stylesheet">
+<link href="/static/css/style.css?v=ui2" rel="stylesheet">
 </head>
 <body>
 <div class="login-page">

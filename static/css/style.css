@@ -167,6 +167,27 @@ img { max-width: 100%; height: auto; }
 .notif-item-sub { font-size: 11px; color: #94A3B8; }
 .notif-empty { display: block; padding: 14px 16px; font-size: 13px; color: #94A3B8; text-align: center; }
 
+/* Read vs unread is the whole point of the bell, so it has to be legible
+   without reading any count: unread carries a dot, read carries a check and
+   muted text. The server renders both states and the click handler swaps one
+   for the other in place, so these selectors cover both paths. */
+.notif-state {
+  width: 8px; height: 8px; border-radius: 50%; background: var(--primary);
+  margin-top: 7px; flex-shrink: 0; box-shadow: 0 0 0 3px rgba(220, 38, 38, .12);
+}
+.notif-state.notif-state-read {
+  width: auto; height: auto; background: none; box-shadow: none; margin-top: 1px;
+}
+.notif-state-read .bi { font-size: 13px; color: #94A3B8; margin-top: 0; }
+.notif-item.notif-read .notif-item-title { font-weight: 500; color: #64748B; }
+.notif-item.notif-read .notif-item-sub { color: #B6C2D1; }
+.notif-item.notif-read > .bi { color: #CBD5E1; }
+.notif-mark-all {
+  display: flex; align-items: center; gap: 8px; width: 100%;
+  font-size: 12.5px; font-weight: 600; color: var(--primary);
+}
+.notif-mark-all .bi { font-size: 14px; }
+
 /* ── FINANCIAL YEAR SWITCHER ── */
 .fy-switcher-btn {
   display: flex; align-items: center; gap: 8px; height: 38px; padding: 0 14px;

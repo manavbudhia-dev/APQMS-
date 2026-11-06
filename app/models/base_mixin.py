@@ -1,8 +1,12 @@
 from utils.http_utils import esc
 from utils.http_utils import get_session
+from utils.http_utils import json_response
+from utils.http_utils import redirect
 from utils.http_utils import SECURITY_HEADERS
 from utils.http_utils import NO_STORE_HEADERS
 import os
+import sqlite3
+import urllib.parse
 from app.config import BASE
 from database import get_db
 from database import list_financial_years
@@ -92,6 +96,73 @@ class BaseMixin:
         </div>'''
 
 
+    # ── BELL NOTIFICATIONS (read receipts) ────────────────────
+    # The list itself stays derived from open drafts, so there is nothing to
+    # keep in sync when a draft is edited or sent; these routes only record
+    # which notifications a user has already seen. Both writes are a single
+    # INSERT OR IGNORE on the (user, quotation) primary key — no read-then-
+    # write window exists, so two fast clicks, or a click racing "mark all as
+    # read", can neither raise a duplicate-key error nor lose an update.
+    def _notifications_unread_count(self, db, user_id):
+        return db.execute(
+            "SELECT COUNT(*) c FROM quotations q "
+            "LEFT JOIN notification_reads nr "
+            "  ON nr.quotation_id=q.id AND nr.user_id=? "
+            "WHERE q.status='Draft' AND nr.quotation_id IS NULL",
+            (user_id,)).fetchone()['c']
+
+    def _notifications_mark_read(self, form, user_id):
+        raw = str(form.get('quotation_id', '')).strip()
+        # isdigit() alone still lets a 40-digit "number" through, and binding
+        # that to a SQLite INTEGER raises OverflowError — a free 500. Cap it
+        # at the int64 range the column can actually hold.
+        if not raw.isdigit() or int(raw) > 9223372036854775807:
+            return json_response({'ok': False, 'error': 'invalid quotation_id'}, 400)
+        qid = int(raw)
+        db = get_db()
+        try:
+            # A receipt for a quotation that never existed is meaningless, and
+            # would trip the foreign key (INSERT OR IGNORE only resolves
+            # uniqueness conflicts, not referential ones).
+            if db.execute("SELECT 1 FROM quotations WHERE id=?", (qid,)).fetchone():
+                db.execute("INSERT OR IGNORE INTO notification_reads "
+                           "(user_id, quotation_id) VALUES (?, ?)", (user_id, qid))
+                db.commit()
+            unread = self._notifications_unread_count(db, user_id)
+        except sqlite3.IntegrityError:
+            # Deleted in the moment between the check and the insert: the
+            # notification is gone, so there is nothing left to acknowledge.
+            unread = self._notifications_unread_count(db, user_id)
+        finally:
+            db.close()
+        return json_response({'ok': True, 'unread': unread})
+
+    def _notifications_mark_all_read(self, user_id):
+        db = get_db()
+        try:
+            db.execute("INSERT OR IGNORE INTO notification_reads "
+                       "(user_id, quotation_id) SELECT ?, id FROM quotations "
+                       "WHERE status='Draft'", (user_id,))
+            db.commit()
+        finally:
+            db.close()
+        return redirect(self._notifications_return_path())
+
+    def _notifications_return_path(self):
+        """Where "Mark all as read" sends the user back: the page they were
+        on, if the Referer is this same site and an ordinary path. The header
+        is never used raw — an absolute cross-site or javascript: URL in it
+        would turn this POST redirect into an open redirect."""
+        try:
+            parsed = urllib.parse.urlparse(self.headers.get('Referer', ''))
+        except ValueError:
+            return '/dashboard'
+        host = (self.headers.get('Host') or '').split(',')[0].strip().lower()
+        if parsed.scheme not in ('http', 'https') or parsed.netloc.lower() != host:
+            return '/dashboard'
+        path = parsed.path if parsed.path not in ('', '/', '/login') else '/dashboard'
+        return path
+
     # ── LOW-LEVEL SEND ───────────────────────────────────────
     def send(self, body, status=200, headers=None):
         self.send_response(status)
@@ -180,6 +251,7 @@ class BaseMixin:
         sess = get_session(self.headers.get('Cookie'))
         full_name = sess.get('full_name', 'User')
         role = sess.get('role', 'user')
+        user_id = sess.get('user_id')
         nav_items = [
             ('dashboard', '/dashboard', 'bi-speedometer2', 'Dashboard'),
             ('quotations', '/quotations', 'bi-file-earmark-text', 'Quotations'),
@@ -200,28 +272,36 @@ class BaseMixin:
 
         # Draft count powers the header notification badge — a real,
         # cheap signal ("N drafts still need attention") rather than a
-        # decorative always-empty bell. The bell also opens a dropdown
-        # listing the actual drafts so clicking it does something.
-        draft_count = 0
+        # decorative always-empty bell. The bell lists the actual drafts,
+        # and which of them *this* user has already opened is stored per
+        # user in notification_reads, so clicking one (or "Mark all as
+        # read") changes the badge instead of leaving it fixed on the raw
+        # draft count.
         notif_rows = []
+        unread_count = 0
         try:
             db = get_db()
-            draft_count = db.execute(
-                "SELECT COUNT(*) c FROM quotations WHERE status='Draft'").fetchone()['c']
+            unread_count = self._notifications_unread_count(db, user_id)
             notif_rows = db.execute(
-                "SELECT q.id, q.quotation_no, q.date, c.company_name "
-                "FROM quotations q LEFT JOIN customers c ON q.customer_id=c.id "
-                "WHERE q.status='Draft' ORDER BY q.created_at DESC LIMIT 5").fetchall()
+                "SELECT q.id, q.quotation_no, q.date, c.company_name, "
+                "  CASE WHEN nr.quotation_id IS NULL THEN 0 ELSE 1 END AS is_read "
+                "FROM quotations q "
+                "LEFT JOIN customers c ON q.customer_id=c.id "
+                "LEFT JOIN notification_reads nr "
+                "  ON nr.quotation_id=q.id AND nr.user_id=? "
+                "WHERE q.status='Draft' "
+                "ORDER BY is_read, q.created_at DESC LIMIT 6",
+                (user_id,)).fetchall()
             db.close()
         except Exception:
-            draft_count = 0
+            unread_count = 0
             notif_rows = []
         badge_html = ''
-        if draft_count > 0:
-            badge_text = '9+' if draft_count > 9 else str(draft_count)
+        if unread_count > 0:
+            badge_text = '9+' if unread_count > 9 else str(unread_count)
             badge_html = f'<span class="notif-badge">{badge_text}</span>'
-        bell_title = (f'{draft_count} draft quotation{"s" if draft_count != 1 else ""} need attention'
-                      if draft_count > 0 else 'No pending drafts')
+        bell_title = (f'{unread_count} unread notification{"s" if unread_count != 1 else ""}'
+                      if unread_count > 0 else 'No unread notifications')
 
         if notif_rows:
             items_html = ''
@@ -229,23 +309,46 @@ class BaseMixin:
                 company = esc(r['company_name'] or 'No customer')
                 qno = esc(r['quotation_no'] or '')
                 date = esc(r['date'] or '')
+                is_read = int(r['is_read'] or 0)
+                state_cls = ' notif-read' if is_read else ''
+                # data-qid drives the click handler below, which records the
+                # receipt before the browser leaves the page.
+                dot_html = ('<span class="notif-state" aria-hidden="true"></span>'
+                            if not is_read else
+                            '<span class="notif-state notif-state-read">'
+                            '<i class="bi bi-check2"></i></span>')
+                unread_label = ('<span class="visually-hidden">Unread</span>'
+                                if not is_read else '')
                 items_html += (
-                    f'<li><a class="dropdown-item notif-item" href="/quotations/{r["id"]}">'
+                    f'<li><a class="dropdown-item notif-item{state_cls}" '
+                    f'href="/quotations/{r["id"]}" data-qid="{r["id"]}">'
                     f'<i class="bi bi-file-earmark-text"></i>'
                     f'<span class="notif-item-text">'
                     f'<span class="notif-item-title">{qno} &middot; {company}</span>'
                     f'<span class="notif-item-sub">Draft &middot; {date}</span>'
-                    f'</span></a></li>')
+                    f'</span>{dot_html}{unread_label}</a></li>')
         else:
-            items_html = '<li><span class="dropdown-item-text notif-empty">No pending drafts</span></li>'
-        notif_dropdown_html = f'''<div class="dropdown">
-          <button type="button" class="topbar-icon-btn" data-bs-toggle="dropdown" aria-expanded="false" title="{esc(bell_title)}" aria-label="Notifications">
+            items_html = ('<li><span class="dropdown-item-text notif-empty">'
+                          'No pending drafts</span></li>')
+        # Only offered when there is something to clear — otherwise the
+        # button would be a permanent, do-nothing fixture.
+        mark_all_html = ''
+        if unread_count > 0:
+            mark_all_html = (
+                '<li><form method="post" action="/notifications/read-all" class="m-0">'
+                '<button type="submit" class="dropdown-item notif-mark-all" '
+                'title="Mark every draft notification as read">'
+                '<i class="bi bi-check2-all"></i>Mark all as read</button>'
+                '</form></li>')
+        notif_dropdown_html = f'''<div class="dropdown notif-bell">
+          <button type="button" class="topbar-icon-btn" data-bs-toggle="dropdown" aria-expanded="false" title="{esc(bell_title)}" aria-label="Notifications{' — ' + str(unread_count) + ' unread' if unread_count else ''}">
             <i class="bi bi-bell"></i>{badge_html}
           </button>
           <ul class="dropdown-menu dropdown-menu-end notif-dropdown">
             <li><h6 class="dropdown-header">Notifications</h6></li>
             {items_html}
             <li><hr class="dropdown-divider"></li>
+            {mark_all_html}
             <li><a class="dropdown-item text-center small" href="/quotations?status=Draft">View all drafts</a></li>
           </ul>
         </div>'''
@@ -263,7 +366,7 @@ class BaseMixin:
 <title>{title} - Aypee Quotation System</title>
 <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
 <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.0/font/bootstrap-icons.css" rel="stylesheet">
-<link href="/static/css/style.css?v=ui1" rel="stylesheet">
+<link href="/static/css/style.css?v=ui2" rel="stylesheet">
 </head>
 <body>
 <div class="d-flex">
@@ -581,6 +684,72 @@ document.addEventListener('keydown', function (e) {{
     queued = true;
     requestAnimationFrame(function() {{ queued = false; prune(); }});
   }}).observe(document.body, {{ childList: true, subtree: true }});
+}})();
+
+/* ── BELL: opening a notification marks it read ───────────────
+   The item is an ordinary link, so it still navigates with
+   scripting off — the receipt is best-effort on top of it.
+   keepalive lets the POST finish while the browser is already
+   leaving the page. */
+(function() {{
+  function setBadge(count) {{
+    var badge = document.querySelector('.notif-badge');
+    if (count > 0) {{
+      var text = count > 9 ? '9+' : String(count);
+      if (!badge) {{
+        badge = document.createElement('span');
+        badge.className = 'notif-badge';
+        var bell = document.querySelector('.topbar-icon-btn .bi-bell');
+        if (bell) bell.parentNode.appendChild(badge);
+      }}
+      badge.textContent = text;
+    }} else if (badge) {{
+      badge.remove();
+    }}
+    // The bell button is the menu's sibling, not its descendant, so the
+    // selector has to go through the wrapper.
+    var bellBtn = document.querySelector('.notif-bell .topbar-icon-btn');
+    if (bellBtn) {{
+      var label = count > 0
+        ? count + ' unread notification' + (count === 1 ? '' : 's')
+        : 'No unread notifications';
+      bellBtn.title = label;
+      // A live Bootstrap tooltip caches its text, so update the
+      // copy it actually renders, not just the attribute.
+      if (bellBtn.dataset.bsOriginalTitle !== undefined) {{
+        bellBtn.dataset.bsOriginalTitle = label;
+      }}
+    }}
+  }}
+
+  document.addEventListener('click', function(e) {{
+    var a = e.target && e.target.closest ? e.target.closest('a.notif-item[data-qid]') : null;
+    if (!a) return;
+    a.classList.add('notif-read');
+    var dot = a.querySelector('.notif-state');
+    if (dot) {{
+      dot.classList.add('notif-state-read');
+      dot.innerHTML = '<i class="bi bi-check2"></i>';
+    }}
+    var tag = a.querySelector('.visually-hidden');
+    if (tag) tag.remove();
+    var body = 'quotation_id=' + encodeURIComponent(a.getAttribute('data-qid'));
+    try {{
+      fetch('/notifications/read', {{
+        method: 'POST',
+        headers: {{ 'Content-Type': 'application/x-www-form-urlencoded' }},
+        body: body,
+        credentials: 'same-origin',
+        keepalive: true
+      }}).then(function(r) {{ return r.json(); }})
+        .then(function(data) {{
+          // Only reached when the tab stayed put (e.g. opened in a
+          // new tab) — otherwise the new page renders the badge itself.
+          if (data && typeof data.unread === 'number') setBadge(data.unread);
+        }})
+        .catch(function() {{ }});
+    }} catch (err) {{ }}
+  }});
 }})();
 </script>
 </body>

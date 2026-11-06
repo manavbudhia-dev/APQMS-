@@ -270,6 +270,12 @@ class RoutingMixin:
 
     # ── POST ─────────────────────────────────────────────────
     POST_ROUTES = [
+        # Notifications (topbar bell read receipts)
+        (re.compile(r'^/notifications/read$'),
+         lambda self, m, form, uid: self.send(*self._notifications_mark_read(form, uid))),
+        (re.compile(r'^/notifications/read-all$'),
+         lambda self, m, form, uid: self.send(*self._notifications_mark_all_read(uid))),
+
         # Financial Year
         (re.compile(r'^/financial-year/select$'),
          lambda self, m, form, uid: self.handle_fy_select(form, uid)),

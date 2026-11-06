@@ -478,6 +478,22 @@ def init_db():
     CREATE INDEX IF NOT EXISTS idx_ocr_documents_status ON ocr_documents(status);
     CREATE INDEX IF NOT EXISTS idx_ocr_documents_customer_id ON ocr_documents(customer_id);
     CREATE INDEX IF NOT EXISTS idx_ocr_document_items_doc ON ocr_document_items(ocr_document_id);
+
+    -- Read receipts for the topbar bell. The notifications themselves stay
+    -- derived from open drafts (one source of truth, nothing to keep in sync
+    -- when a draft is edited or sent), so the only fact worth storing is
+    -- "this user has already seen this one" — hence a (user, quotation) key
+    -- rather than a global flag, so one person reading a draft doesn't clear
+    -- it from a colleague's badge. Both FKs cascade: receipts can never
+    -- outlive the quotation or the account they belong to.
+    CREATE TABLE IF NOT EXISTS notification_reads (
+        user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        quotation_id INTEGER NOT NULL REFERENCES quotations(id) ON DELETE CASCADE,
+        read_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (user_id, quotation_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_notification_reads_user
+        ON notification_reads(user_id);
     """)
     # Migrations for existing databases: add columns that didn't exist in
     # earlier releases. Only "duplicate column name" is expected/benign
