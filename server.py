@@ -38,6 +38,7 @@ from app.views.financial_year_pages import FinancialYearPagesMixin
 from app.views.metrics_pages import BusinessMetricsPagesMixin
 from app.views.ocr_pages import OcrPagesMixin
 from app.views.api_token_pages import ApiTokenPagesMixin
+from app.views.vision_pages import VisionPagesMixin
 from app.assistant.api import AssistantApiMixin
 
 
@@ -60,6 +61,7 @@ class QuotationHandler(
         BusinessMetricsPagesMixin,
         OcrPagesMixin,
         ApiTokenPagesMixin,
+        VisionPagesMixin,
         AssistantApiMixin,
         BaseMixin,
         http.server.BaseHTTPRequestHandler):
@@ -81,6 +83,7 @@ class QuotationHandler(
         (items & customers are unaffected — see app/models/base_mixin.py
         _current_fy / _fy_switcher_html for the shared selection logic)
       - ApiTokenPagesMixin   -> Settings > API Tokens (for the assistant API)
+      - VisionPagesMixin     -> Photo Quote: photo of a hand-edited sheet -> quotation
       - AssistantApiMixin    -> /api/v1/* JSON API, chat endpoint, Telegram webhook
       - BaseMixin            -> send(), serve_static(), _layout(), log_message()
     """

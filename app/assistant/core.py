@@ -313,7 +313,10 @@ def resolve_items(lines, _rows=None):
             if cat is None:
                 issues.append(f'Item {n}: catalog item_id {raw_id} not found.')
                 continue
-        elif text and idx is not None:
+        elif text and idx is not None and not line.get('no_catalog'):
+            # no_catalog=True keeps the caller's exact text (e.g. a line read
+            # from a photographed quotation) instead of swapping in the
+            # closest catalog item's name.
             exact = [r for r in rows if r['item_name'].strip().lower() == text.lower()]
             if exact:
                 cat, score = exact[0], 1.0

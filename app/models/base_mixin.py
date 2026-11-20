@@ -258,6 +258,7 @@ class BaseMixin:
             ('proforma', '/proforma', 'bi-receipt', 'Proforma Invoices'),
             ('packing', '/packing', 'bi-box-seam', 'Packing Lists'),
             ('ocr', '/ocr', 'bi-file-earmark-arrow-up', 'Scan & Import'),
+            ('photo', '/photo-quote', 'bi-camera', 'Photo Quote'),
             ('customers', '/customers', 'bi-people', 'Customers'),
             ('items', '/items', 'bi-box-seam', 'Items Catalog'),
             ('salary', '/salary', 'bi-cash-stack', 'Salary'),
