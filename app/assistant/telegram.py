@@ -15,6 +15,9 @@ Configuration (environment variables):
                                  for hosts that block Telegram (see
                                  tools/telegram_relay/README.md)
   APQMS_TELEGRAM_RELAY_KEY       sent as X-Relay-Key to that relay
+  APQMS_TELEGRAM_WEBHOOK_URL     optional public webhook address. Default: the
+                                 relay's /webhook when a relay is set, else
+                                 <site>/api/v1/telegram/webhook
 
 Two ways to run it:
   * webhook  — the server receives updates at POST /api/v1/telegram/webhook
@@ -64,6 +67,16 @@ def bot_user():
 
 def api_base():
     return (os.environ.get('APQMS_TELEGRAM_API_URL') or API).strip().rstrip('/')
+
+
+def webhook_url(site_base):
+    """Address Telegram should POST updates to."""
+    explicit = os.environ.get('APQMS_TELEGRAM_WEBHOOK_URL', '').strip()
+    if explicit:
+        return explicit
+    if api_base() != API:            # host blocks Telegram both ways: come in through the relay too
+        return api_base() + '/webhook'
+    return site_base.rstrip('/') + '/api/v1/telegram/webhook'
 
 
 def _headers(content_type):
@@ -150,7 +163,7 @@ def handle_update(update):
 def set_webhook(base_url):
     if not webhook_secret():
         raise SystemExit('Set APQMS_TELEGRAM_WEBHOOK_SECRET first (any long random string).')
-    url = base_url.rstrip('/') + '/api/v1/telegram/webhook'
+    url = webhook_url(base_url)
     return _call('setWebhook', {'url': url, 'secret_token': webhook_secret(),
                                 'allowed_updates': ['message', 'edited_message'],
                                 'drop_pending_updates': True})
@@ -182,7 +195,7 @@ def diagnose(expected_base_url=''):
     except Exception as e:
         return out + [(False, f'getWebhookInfo fail hua: {e}')]
     url = info.get('url') or ''
-    expected = expected_base_url.rstrip('/') + '/api/v1/telegram/webhook' if expected_base_url else ''
+    expected = webhook_url(expected_base_url) if expected_base_url else ''
     if not url:
         out.append((False, 'Webhook register NAHI hai, isliye bot ko messages nahi milte. '
                            '"Register webhook" dabayein.'))
@@ -202,6 +215,11 @@ def diagnose(expected_base_url=''):
             hint = ' → URL par app nahi mila; site address check karein.'
         elif '5' in err[:40] and 'Internal' in err:
             hint = ' → Server par error aaya; cPanel ka error log dekhein.'
+        elif 'timed out' in err.lower() or 'connection refused' in err.lower():
+            hint = (' → Telegram aapki site tak nahi pahunch pa raha (hosting firewall). Relay set karein '
+                    '(APQMS_TELEGRAM_API_URL) aur "Register webhook" dobara dabayein — webhook relay ke through aayega.')
+        if when and url and info.get('last_error_date', 0) < time.time() - 600:
+            hint += ' (Ye error purana ho sakta hai; naya message bhej kar dobara check karein.)'
         out.append((False, f'Telegram ka last error ({when}): {err}{hint}'))
     elif url:
         out.append((True, 'Telegram ko webhook par koi error nahi mila.'))
