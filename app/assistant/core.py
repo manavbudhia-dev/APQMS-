@@ -198,6 +198,12 @@ def resolve_customer(ref):
                   if all(any(w.startswith(q) for w in _company_key(r['company_name']).split()) for q in qk)]
         if len(prefix) == 1 and len(''.join(qk)) >= 3:
             return _customer_dict(prefix[0])
+        if not prefix and len(''.join(qk)) >= 4:
+            # Spacing differs: "wiper drive" vs "WIPERDRIVE ENGINEERING".
+            joined = ''.join(qk)
+            glued = [r for r in rows if _company_key(r['company_name']).replace(' ', '').startswith(joined)]
+            if len(glued) == 1:
+                return _customer_dict(glued[0])
         if len(prefix) > 1:
             names = [r['company_name'] for r in prefix[:5]]
             raise AssistantError(f'"{ref}" naam ke kai customer hain: ' + ', '.join(names)

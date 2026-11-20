@@ -100,6 +100,42 @@ class Assistant(unittest.TestCase):
         it = parser.parse_item('grease 5 kg')
         self.assertEqual((it['item'], it['quantity'], it['unit'], it['rate']), ('grease', 5, 'Kg.', None))
 
+    def test_subject_without_colon(self):
+        i = parser.parse('quotation Krishna Sugar\n10 mtr roller chain 25.4 @ 450\nSubject chain and spares')
+        self.assertEqual(i['args']['subject'], 'chain and spares')
+        self.assertEqual(len(i['args']['items']), 1)
+
+    def test_customer_suggestion_yes(self):
+        ck = 'test:suggest'
+        r = bot.handle('quotation balaji engg works\n5 nos bearing 6205 @ 250\nsubject spares', self.admin,
+                       chat_key=ck, attach_pdf=False)
+        if r.ok:                                  # matched directly: nothing to test here
+            return
+        self.assertIn('Balaji Engineering Works', r.text)
+        r = bot.handle('Yes', self.admin, chat_key=ck, attach_pdf=False)
+        self.assertTrue(r.ok, r.text)
+        self.assertIn('Balaji Engineering Works', r.text)
+        self.assertIn('spares', r.text)
+        r = bot.handle('Yes', self.admin, chat_key=ck, attach_pdf=False)   # pending cleared
+        self.assertFalse(r.ok)
+
+    def test_customer_suggestion_pick_and_cancel(self):
+        ck = 'test:suggest2'
+        tokens.set_pending(f'cust:{ck}', {'kind': 'quotation', 'suggestions': ['Shree Ram Sugars Pvt Ltd',
+                                                                              'Krishna Sugar Mills Ltd.'],
+                                          'args': {'customer': 'sugar', 'items': [
+                                              {'item': 'bearing 6205', 'quantity': 2, 'unit': 'Nos.', 'rate': 250}]}})
+        r = bot.handle('haan', self.admin, chat_key=ck, attach_pdf=False)
+        self.assertIn('Number likhein', r.text)
+        r = bot.handle('2', self.admin, chat_key=ck, attach_pdf=False)
+        self.assertTrue(r.ok, r.text)
+        self.assertIn('Krishna Sugar Mills', r.text)
+        tokens.set_pending(f'cust:{ck}', {'kind': 'quotation', 'suggestions': ['Shree Ram Sugars Pvt Ltd'],
+                                          'args': {'customer': 'x', 'items': []}})
+        r = bot.handle('no', self.admin, chat_key=ck, attach_pdf=False)
+        self.assertIn('chhod diya', r.text)
+        self.assertIsNone(tokens.get_pending(f'cust:{ck}'))
+
     # ── API ──
     def test_auth_required(self):
         s, b = self.api('GET', '/api/v1/items', token=False)
