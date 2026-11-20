@@ -144,6 +144,14 @@ class RoutingMixin:
         (re.compile(r'^/settings/backup/server/([\w.\-]+)$'),
          lambda self, m, qs, uid: self.send(*self._settings_server_backup_download(uid, m.group(1)))
          if _is_safe_backup_filename(m.group(1)) else self.send(*html_response(self.pg_404(), 404))),
+        (re.compile(r'^/settings/api-tokens$'),
+         lambda self, m, qs, uid: self.send(*html_response(self.pg_api_tokens(uid)))),
+        (re.compile(r'^/photo-quote$'),
+         lambda self, m, qs, uid: self.send(*html_response(self.pg_photo_quote(uid)))),
+        (re.compile(r'^/photo-quote/(\d+)$'),
+         lambda self, m, qs, uid: self.send(*html_response(self.pg_photo_review(uid, _id(m))))),
+        (re.compile(r'^/photo-quote/(\d+)/image$'),
+         lambda self, m, qs, uid: self.serve_photo_image(_id(m))),
         (re.compile(r'^/settings/export$'),
          lambda self, m, qs, uid: self.send(*self._settings_export(uid))),
 
@@ -283,6 +291,20 @@ class RoutingMixin:
          lambda self, m, form, uid: self.handle_fy_add(form, uid)),
 
         # Settings
+        (re.compile(r'^/settings/api-tokens$'),
+         lambda self, m, form, uid: self.handle_api_token_create(form, uid)),
+        (re.compile(r'^/photo-quote/ai-test$'),
+         lambda self, m, form, uid: self.handle_ai_test(form, uid)),
+        (re.compile(r'^/photo-quote/upload$'),
+         lambda self, m, form, uid: self.handle_photo_upload(form, uid)),
+        (re.compile(r'^/photo-quote/(\d+)/confirm$'),
+         lambda self, m, form, uid: self.handle_photo_confirm(_id(m), form, uid)),
+        (re.compile(r'^/photo-quote/(\d+)/retry$'),
+         lambda self, m, form, uid: self.handle_photo_retry(_id(m), form, uid)),
+        (re.compile(r'^/photo-quote/(\d+)/delete$'),
+         lambda self, m, form, uid: self.handle_photo_delete(_id(m), form, uid)),
+        (re.compile(r'^/settings/api-tokens/(\d+)/revoke$'),
+         lambda self, m, form, uid: self.handle_api_token_revoke(_id(m), form, uid)),
         (re.compile(r'^/settings/profile$'),
          lambda self, m, form, uid: self.handle_profile_update(form, uid)),
         (re.compile(r'^/settings/users/(\d+)/toggle-status$'),
@@ -456,6 +478,10 @@ class RoutingMixin:
         if path.startswith('/static/'):
             return self.serve_static(path)
 
+        # Assistant / bot / CLI JSON API: bearer-token auth, no cookies.
+        if path.startswith('/api/v1/'):
+            return self._api_dispatch('GET', path, qs, b'')
+
         # Public routes
         if path == '/login' or path == '/':
             if path == '/' and user_id:
@@ -542,6 +568,12 @@ class RoutingMixin:
         else:
             body = raw_body.decode('utf-8', errors='replace')
             form = parse_form(body, ct)
+
+        # Assistant / bot / CLI JSON API. Authenticated by bearer token (or
+        # the Telegram webhook secret), never by cookie, so the browser
+        # same-origin check below does not apply to it.
+        if path.startswith('/api/v1/'):
+            return self._api_dispatch('POST', path, urllib.parse.parse_qs(parsed.query), raw_body)
 
         # Cross-site request forgery check — applies to every POST route,
         # including ones that don't (yet) carry their own per-form CSRF

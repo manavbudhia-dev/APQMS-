@@ -37,6 +37,19 @@ form lives right next to the `pg_*` function that renders it.
 | Recalculate Business Metrics (admin only) | `metrics_pages.py` |
 | Upload a document / save reviewed data / create a quotation from it | `ocr_pages.py` |
 
+## "I want to work on Photo Quote (photo of a hand-edited sheet -> quotation)"
+
+`app/vision/` (prompt, JSON schema, Claude call, validation, audit store) and
+`app/views/vision_pages.py` (upload / review / confirm). Optional
+dependency: `requirements-vision.txt` + `ANTHROPIC_API_KEY`. See
+**`PHOTO_QUOTE.md`**.
+
+## "I want to work on the AI assistant / Telegram bot / API / CLI"
+
+Everything lives in `app/assistant/` (+ `apqms_cli.py` and the Settings →
+API Tokens page in `app/views/api_token_pages.py`). Setup, bot commands and
+the API reference are in **`ASSISTANT_API.md`**.
+
 ## "I want to work on Business Metrics (forecasting / pricing / anomalies)"
 
 This is the one part of the app with an optional dependency — see

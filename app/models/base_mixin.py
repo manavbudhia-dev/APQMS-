@@ -258,6 +258,7 @@ class BaseMixin:
             ('proforma', '/proforma', 'bi-receipt', 'Proforma Invoices'),
             ('packing', '/packing', 'bi-box-seam', 'Packing Lists'),
             ('ocr', '/ocr', 'bi-file-earmark-arrow-up', 'Scan & Import'),
+            ('photo', '/photo-quote', 'bi-camera', 'Photo Quote'),
             ('customers', '/customers', 'bi-people', 'Customers'),
             ('items', '/items', 'bi-box-seam', 'Items Catalog'),
             ('salary', '/salary', 'bi-cash-stack', 'Salary'),
@@ -406,6 +407,7 @@ class BaseMixin:
           </button>
           <ul class="dropdown-menu dropdown-menu-end">
             <li><a class="dropdown-item" href="/settings"><i class="bi bi-gear"></i> Settings</a></li>
+            <li><a class="dropdown-item" href="/settings/api-tokens"><i class="bi bi-plug"></i> API Tokens</a></li>
             <li><a class="dropdown-item" href="/change-password"><i class="bi bi-key"></i> Change Password</a></li>
             {admin_link}
             <li><hr class="dropdown-divider"></li>
