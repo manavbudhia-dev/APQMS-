@@ -9,3 +9,6 @@ __pycache__/
 # Uploaded photos (audit copies) — live data, never commit
 vision_uploads/
 ocr_uploads/
+
+# Local settings with secrets (see .env.example)
+.env
