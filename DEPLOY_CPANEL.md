@@ -12,7 +12,10 @@ You need (one time, ~20 minutes): cPanel access and the GitHub repo's Settings p
 
 ## Step 1 — SSH key in cPanel (so cPanel can read the private repo)
 1. cPanel → **SSH Access** → **Manage SSH Keys** → **Generate a New Key**.
-2. **Key Name:** leave the default `id_rsa`. **Key Password: leave empty**, because cPanel cannot use a key with a password for Git. Click **Generate Key** and accept the warning about the empty password.
+2. **Key Name:** leave the default `id_rsa`. **Key Password: leave empty**, because cPanel cannot use a key with a password for Git.
+   - **Key Type: RSA, Key Size: 4096.** GitHub rejects RSA keys under 3072 bits ("Key is too short"), and cPanel's default is 2048.
+   - Click **Generate Key** and accept the warning about the empty password.
+   - Made a 2048-bit key already? Delete it first: Manage SSH Keys → `id_rsa` → **Delete Key**, under both Public Keys and Private Keys. Then generate again.
 3. Back on Manage SSH Keys, under **Public Keys**, click `id_rsa.pub` → **View/Download**, and copy the whole key (`ssh-rsa AAAA...`).
 
 > If `id_rsa` already exists and is used for something else, ask me — it then needs a `~/.ssh/config` file.
