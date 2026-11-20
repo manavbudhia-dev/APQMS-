@@ -140,6 +140,58 @@ def set_webhook(base_url):
                                 'drop_pending_updates': True})
 
 
+def diagnose(expected_base_url=''):
+    """Plain-language checks of the bot setup, for the admin page.
+    -> list of (ok: bool|None, text). Never raises."""
+    out = []
+    if not bot_token():
+        return [(False, 'APQMS_TELEGRAM_BOT_TOKEN set nahi hai (.env mein daal kar app restart karein).')]
+    try:
+        me = _call('getMe', timeout=15).get('result') or {}
+        out.append((True, f"Bot token sahi hai: @{me.get('username')}"))
+    except urllib.error.HTTPError as e:
+        return [(False, f'Telegram ne bot token reject kiya (HTTP {e.code}). @BotFather se token dobara copy karein.')]
+    except Exception as e:
+        return [(False, f'Server se api.telegram.org tak connection nahi bana: {e}')]
+    try:
+        info = _call('getWebhookInfo', timeout=15).get('result') or {}
+    except Exception as e:
+        return out + [(False, f'getWebhookInfo fail hua: {e}')]
+    url = info.get('url') or ''
+    expected = expected_base_url.rstrip('/') + '/api/v1/telegram/webhook' if expected_base_url else ''
+    if not url:
+        out.append((False, 'Webhook register NAHI hai, isliye bot ko messages nahi milte. '
+                           '"Register webhook" dabayein.'))
+    elif expected and url != expected:
+        out.append((False, f'Webhook galat URL par hai: {url} (hona chahiye {expected}). "Register webhook" dabayein.'))
+    else:
+        out.append((True, f'Webhook URL: {url}'))
+    if info.get('last_error_message'):
+        when = info.get('last_error_date')
+        when = time.strftime('%d %b %H:%M UTC', time.gmtime(when)) if when else ''
+        err = info['last_error_message']
+        hint = ''
+        if '403' in err:
+            hint = (' → Server ka APQMS_TELEGRAM_WEBHOOK_SECRET us secret se alag hai jisse webhook register hua tha. '
+                    '"Register webhook" dobara dabayein.')
+        elif '404' in err:
+            hint = ' → URL par app nahi mila; site address check karein.'
+        elif '5' in err[:40] and 'Internal' in err:
+            hint = ' → Server par error aaya; cPanel ka error log dekhein.'
+        out.append((False, f'Telegram ka last error ({when}): {err}{hint}'))
+    elif url:
+        out.append((True, 'Telegram ko webhook par koi error nahi mila.'))
+    pending = info.get('pending_update_count') or 0
+    if pending:
+        out.append((None, f'{pending} message(s) deliver hone ka wait kar rahe hain.'))
+    if not webhook_secret():
+        out.append((False, 'APQMS_TELEGRAM_WEBHOOK_SECRET set nahi hai — iske bina server har message 403 se reject karega.'))
+    if not allowed_chats():
+        out.append((None, 'APQMS_TELEGRAM_ALLOWED_CHATS khaali hai — bot sirf aapka chat id batayega. '
+                          'Wo id .env mein daal kar restart karein.'))
+    return out
+
+
 def delete_webhook():
     return _call('deleteWebhook', {'drop_pending_updates': False})
 

@@ -186,6 +186,29 @@ class Assistant(unittest.TestCase):
             self.assertIn('/login', e.headers['Location'])
 
     # ── Telegram ──
+    def test_telegram_diagnose(self):
+        orig = telegram._call
+        info = {'url': '', 'pending_update_count': 3}
+
+        def fake(m, p=None, timeout=30):
+            if m == 'getMe':
+                return {'ok': True, 'result': {'username': 'apqmsbot'}}
+            return {'ok': True, 'result': info}
+        telegram._call = fake
+        try:
+            txt = ' '.join(t for _, t in telegram.diagnose('https://x.example'))
+            self.assertIn('@apqmsbot', txt)
+            self.assertIn('register NAHI', txt)
+            self.assertIn('3 message', txt)
+            info.update({'url': 'https://x.example/api/v1/telegram/webhook',
+                         'last_error_message': 'Wrong response from the webhook: 403 Forbidden',
+                         'last_error_date': 1700000000})
+            rep = telegram.diagnose('https://x.example')
+            self.assertTrue(rep[1][0])
+            self.assertIn('WEBHOOK_SECRET', ' '.join(t for _, t in rep))
+        finally:
+            telegram._call = orig
+
     def test_telegram_webhook(self):
         sent = []
         orig_call, orig_doc = telegram._call, telegram._send_document
