@@ -1,5 +1,7 @@
 # File Guide — where do I make my change?
 
+> Deploying to cPanel shared hosting: see **`DEPLOY_CPANEL.md`** (auto-deploy on every merge to `main`).
+
 Quick lookup: find what you want to change on the left, edit the file on the right.
 
 ## "I want to change how a page looks or what it shows"
