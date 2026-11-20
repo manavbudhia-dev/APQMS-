@@ -127,19 +127,57 @@ def send_reply(chat_id, reply):
         _send_document(chat_id, reply.pdf_name or 'document.pdf', reply.pdf)
 
 
+# ── last update (shown by Check webhook) ─────────────────────
+def _last_path():
+    from app.config import BASE
+    return os.path.join(BASE, 'tmp', 'telegram_last.json')
+
+
+def record_last(**info):
+    """Remember what happened to the latest update. Never raises."""
+    try:
+        info['at'] = time.strftime('%d %b %H:%M:%S UTC', time.gmtime())
+        os.makedirs(os.path.dirname(_last_path()), exist_ok=True)
+        with open(_last_path(), 'w', encoding='utf-8') as f:
+            json.dump(info, f)
+    except Exception:
+        pass
+
+
+def last_update():
+    try:
+        with open(_last_path(), encoding='utf-8') as f:
+            return json.load(f)
+    except Exception:
+        return None
+
+
+def _err_text(e):
+    detail = ''
+    if isinstance(e, urllib.error.HTTPError):
+        try:
+            detail = ' ' + e.read().decode('utf-8', 'replace')[:200]
+        except Exception:
+            pass
+    return f'{type(e).__name__}: {e}{detail}'[:400]
+
+
 # ── update handling (shared by webhook + polling) ────────────
 def handle_update(update):
     """Process one Telegram update dict. Never raises."""
+    chat_id, text = None, ''
     try:
         msg = update.get('message') or update.get('edited_message') or {}
         text = msg.get('text') or msg.get('caption') or ''
         chat = msg.get('chat') or {}
         chat_id = chat.get('id')
         if chat_id is None or not text:
+            record_last(chat_id=chat_id, text='', result='ignored (no text)')
             return
         if str(chat_id) not in allowed_chats():
             send_text(chat_id, f'Aap is bot ke liye authorised nahi hain.\nAapka chat id: {chat_id}\n'
                                'Admin ise APQMS_TELEGRAM_ALLOWED_CHATS mein add kare.')
+            record_last(chat_id=chat_id, text=text[:40], result='not in ALLOWED_CHATS — chat id reply bheja')
             return
         user = bot_user()
         if user is None:
@@ -152,8 +190,10 @@ def handle_update(update):
         reply = bot.handle(text, user, chat_key=f'tg:{chat_id}',
                            notify=lambda t: send_text(chat_id, t))
         send_reply(chat_id, reply)
-    except Exception:
+        record_last(chat_id=chat_id, text=text[:40], result='reply bheja')
+    except Exception as e:
         traceback.print_exc(file=sys.stderr)
+        record_last(chat_id=chat_id, text=text[:40], result='ERROR ' + _err_text(e))
         try:
             send_text(update['message']['chat']['id'], '⚠️ Kuch galat ho gaya. Dobara try karein.')
         except Exception:
@@ -223,6 +263,15 @@ def diagnose(expected_base_url=''):
         out.append((False, f'Telegram ka last error ({when}): {err}{hint}'))
     elif url:
         out.append((True, 'Telegram ko webhook par koi error nahi mila.'))
+    last = last_update()
+    if last:
+        bad = str(last.get('result', '')).startswith('ERROR')
+        out.append((not bad,
+                    f"Aakhri message server par aaya {last.get('at')} — chat {last.get('chat_id')}, "
+                    f"\"{last.get('text')}\" → {last.get('result')}"))
+    elif url:
+        out.append((None, 'Server par abhi tak koi Telegram message nahi aaya. Register ke BAAD bot ko "hi" '
+                          'bhejein, phir dobara Check webhook dabayein.'))
     pending = info.get('pending_update_count') or 0
     if pending:
         out.append((None, f'{pending} message(s) deliver hone ka wait kar rahe hain.'))

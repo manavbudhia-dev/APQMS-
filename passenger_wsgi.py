@@ -19,6 +19,12 @@ import os
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from server import QuotationHandler, init_db
+from app.assistant import telegram as _telegram
+
+# Passenger may freeze or stop the process right after a response, so a
+# background thread can die before the bot's reply is sent. Handle
+# Telegram updates inside the webhook request instead.
+_telegram.ASYNC_WEBHOOK = False
 
 # Make sure the database/tables exist (server.py normally does this
 # inside `if __name__ == '__main__'`, which never runs under Passenger).

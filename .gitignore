@@ -13,3 +13,4 @@ ADMIN_CREDENTIALS.txt
 # Uploaded files (audit copies) — live data, never commit
 vision_uploads/
 ocr_uploads/
+tmp/
