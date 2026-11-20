@@ -37,7 +37,7 @@ from utils.http_utils import (
     file_response,
     UploadedFile,
 )
-from database import get_db, DB_PATH, init_db
+from database import get_db, DB_PATH, init_db, begin_immediate
 from database import wait_for_connections_to_close
 from utils import backup_crypto
 
@@ -451,6 +451,19 @@ class SettingsPagesMixin:
             return redirect('/settings')
         db = get_db()
         try:
+            # Read-then-write under the write lock: two admins deactivating
+            # each other at the same time must not both succeed and leave
+            # no active admin who can sign in to undo it.
+            begin_immediate(db)
+            target = db.execute("SELECT role, COALESCE(is_active, 1) a FROM users WHERE id=?",
+                                (target_id,)).fetchone()
+            if target and target['role'] == 'admin' and target['a']:
+                active_admins = db.execute(
+                    "SELECT COUNT(*) c FROM users WHERE role='admin' AND COALESCE(is_active, 1)=1"
+                ).fetchone()['c']
+                if active_admins <= 1:
+                    db.rollback()
+                    return redirect('/settings')
             db.execute("UPDATE users SET is_active = 1 - COALESCE(is_active, 1) WHERE id=?",
                        (target_id,))
             db.commit()
@@ -477,11 +490,18 @@ class SettingsPagesMixin:
             return redirect('/settings')
         db = get_db()
         try:
-            target = db.execute("SELECT role FROM users WHERE id=?", (target_id,)).fetchone()
-            if target and target['role'] == 'admin':
+            # Count and delete under one write lock, so two admins deleting
+            # each other concurrently can't both pass the check. Only
+            # *active* admins count: an inactive one can't sign in to help.
+            begin_immediate(db)
+            target = db.execute("SELECT role, COALESCE(is_active, 1) a FROM users WHERE id=?",
+                                (target_id,)).fetchone()
+            if target and target['role'] == 'admin' and target['a']:
                 admin_count = db.execute(
-                    "SELECT COUNT(*) c FROM users WHERE role='admin'").fetchone()['c']
+                    "SELECT COUNT(*) c FROM users WHERE role='admin' AND COALESCE(is_active, 1)=1"
+                ).fetchone()['c']
                 if admin_count <= 1:
+                    db.rollback()
                     return redirect('/settings')
             db.execute("DELETE FROM users WHERE id=?", (target_id,))
             db.commit()
