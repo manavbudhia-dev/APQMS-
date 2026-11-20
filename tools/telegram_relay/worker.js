@@ -5,6 +5,12 @@
 //
 // Secret (Worker setting): RELAY_KEY — same value as APQMS_TELEGRAM_RELAY_KEY
 // in the app's .env. Requests without it get 403, so this is not an open proxy.
+//
+// Incoming direction too: when the host also blocks Telegram's servers from
+// reaching the site, register the webhook at https://<worker>/webhook. The
+// Worker passes the POST (with Telegram's X-Telegram-Bot-Api-Secret-Token
+// header, which the app checks) to WEBHOOK_TARGET (Worker variable), e.g.
+// https://your-site/api/v1/telegram/webhook.
 const BOT_PATH = /^\/(file\/)?bot\d+:[A-Za-z0-9_-]+\/[A-Za-z0-9_./-]*$/;
 
 function same(a, b) {
@@ -19,6 +25,16 @@ export default {
     const url = new URL(request.url);
     if (url.pathname === '/' || url.pathname === '/health') {
       return new Response('telegram relay ok\n');
+    }
+    if (url.pathname === '/webhook') {
+      if (request.method !== 'POST' || !env.WEBHOOK_TARGET) {
+        return new Response('not found\n', { status: 404 });
+      }
+      const fwd = { 'content-type': request.headers.get('content-type') || 'application/json' };
+      const secret = request.headers.get('X-Telegram-Bot-Api-Secret-Token');
+      if (secret) fwd['X-Telegram-Bot-Api-Secret-Token'] = secret;
+      const r = await fetch(env.WEBHOOK_TARGET, { method: 'POST', headers: fwd, body: request.body });
+      return new Response(await r.text(), { status: r.status, headers: { 'content-type': 'application/json' } });
     }
     if (!env.RELAY_KEY || !same(request.headers.get('X-Relay-Key') || '', env.RELAY_KEY)) {
       return new Response(JSON.stringify({ ok: false, description: 'relay: bad or missing X-Relay-Key' }),

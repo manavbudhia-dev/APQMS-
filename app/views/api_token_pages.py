@@ -78,13 +78,13 @@ class ApiTokenPagesMixin:
       <button class="btn btn-sm btn-outline-primary"><i class="bi bi-search"></i> Check webhook</button>
     </form>
     <form method="post" action="/settings/telegram/register"
-          onsubmit="return confirm('Webhook ko {esc(self._telegram_base())}/api/v1/telegram/webhook par register karein?')">
+          onsubmit="return confirm('Webhook ko {esc(telegram.webhook_url(self._telegram_base()))} par register karein?')">
       <input type="hidden" name="csrf_token" value="{esc(csrf)}">
       <button class="btn btn-sm btn-primary" {"disabled" if not (bot_token() and webhook_secret()) else ""}>
         <i class="bi bi-link-45deg"></i> Register webhook</button>
     </form>
   </div>
-  <small class="text-muted">Register: <code>{esc(self._telegram_base())}/api/v1/telegram/webhook</code> (HTTPS hona chahiye).
+  <small class="text-muted">Register: <code>{esc(telegram.webhook_url(self._telegram_base()))}</code> (HTTPS hona chahiye).
   Setup steps: ASSISTANT_API.md.</small>
 </div>'''
 
