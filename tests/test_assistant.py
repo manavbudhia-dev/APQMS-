@@ -38,6 +38,8 @@ from server import QuotationHandler                      # noqa: E402
 from app.assistant import bot, core, parser, telegram, tokens   # noqa: E402
 import apqms_cli                                         # noqa: E402
 
+telegram.ASYNC_WEBHOOK = False      # process webhook updates inline so tests can assert on them
+
 
 def seed():
     db = database.get_db()

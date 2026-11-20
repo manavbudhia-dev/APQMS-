@@ -61,6 +61,11 @@ def ensure_schema():
             );
             CREATE INDEX IF NOT EXISTS idx_vision_extractions_created_by ON vision_extractions(created_by);
             """)
+            cols = {r[1] for r in db.execute("PRAGMA table_info(vision_extractions)").fetchall()}
+            for col, typ in (('source', "TEXT DEFAULT 'photo'"), ('source_text', 'TEXT'),
+                             ('draft_json', 'TEXT')):
+                if col not in cols:     # 'text' rows: values read from text pasted in the bot
+                    db.execute(f"ALTER TABLE vision_extractions ADD COLUMN {col} {typ}")
             db.commit()
         finally:
             db.close()
@@ -85,6 +90,31 @@ def create(user_id, filename, media_type, data):
         db.execute("UPDATE vision_extractions SET stored_filename=? WHERE id=?", (name, rid))
         db.commit()
         return rid
+    finally:
+        db.close()
+
+
+def create_text(user_id, text, label='Telegram text'):
+    """Record text the user pasted (instead of a photo); -> new row id."""
+    ensure_schema()
+    db = get_db()
+    try:
+        rid = db.execute(
+            "INSERT INTO vision_extractions (created_by, original_filename, status, source, source_text, "
+            "image_sha256) VALUES (?,?,?,?,?,?)",
+            (user_id, label[:200], STATUS_EXTRACTED, 'text', text,
+             hashlib.sha256(text.encode('utf-8')).hexdigest())).lastrowid
+        db.commit()
+        return rid
+    finally:
+        db.close()
+
+
+def save_draft(rid, values):
+    db = get_db()
+    try:
+        db.execute("UPDATE vision_extractions SET draft_json=? WHERE id=?", (json.dumps(values), rid))
+        db.commit()
     finally:
         db.close()
 
@@ -123,6 +153,7 @@ def get(rid):
     d = dict(row)
     d['extracted'] = json.loads(d['extracted_json']) if d.get('extracted_json') else empty_extraction()
     d['confirmed'] = json.loads(d['confirmed_json']) if d.get('confirmed_json') else None
+    d['draft'] = json.loads(d['draft_json']) if d.get('draft_json') else None
     return d
 
 

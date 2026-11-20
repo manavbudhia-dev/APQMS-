@@ -40,8 +40,21 @@ po: 4512
 | `customer krishna` | Customer search |
 | `item chain 25.4` / `rate of grease` | Catalog item + rate |
 | `add customer Shree Ram Sugars` (agli lines: `phone: …`, `gstin: …`, `contact: …`) | Naya customer |
+| *(sheet ka copy kiya text paste karo)* | Values padh kar dikhayega → `ok <customer>` se quotation + PDF |
 | `summary` | Is mahine ka hisaab |
 | `help` | Saare examples |
+
+### Quotation sheet ka text paste karna (photo nahi, sirf text)
+
+1. Phone par sheet ki photo kheencho, phir camera / Google Photos / Google Lens mein **"Copy text"** dabao.
+2. Telegram bot mein wo text **paste** karke bhej do. (Bot sheet ko pehchaan leta hai jab text mein GST / delivery / payment / pitch jaise shabd hon. Pakka karna ho to text se pehle `sheet` likh do.)
+3. Bot Claude se values padh kar dikhata hai:
+   - 🔴 rate / qty / delivery sheet se milakar check karni hain
+   - ⚠️ jahan shak hai, wahan kaaran bhi likha hota hai (jaise "7600 aur 8360 dono mile")
+4. Galti ho to sudhaaro: `rate 8360`, `qty 70`, `delivery 8`, `payment 25% advance, balance in one month`, `gst 18`, `width 471`, `height 98`, `customer Krishna Sugar` (ek message mein kai lines bhi chalengi).
+5. Sab sahi ho to: `ok Krishna Sugar Mills` → quotation ban jaati hai aur PDF chat mein aa jaati hai. Phir `isko proforma bana do` bhi chalega. Chhodna ho to: `cancel`.
+
+Copy kiye text mein strikethrough nahi hota, isliye purani aur nayi dono values aa jaati hain. Bot apna best guess dikhata hai, par **final faisla aapka "ok"** hai. Ise `ANTHROPIC_API_KEY` aur `pip install -r requirements-vision.txt` chahiye (neeche Telegram setup dekhein). Har pasted sheet ek paid API call hai. Pasted text, AI output, aapke sudhaar aur final values sab app mein **Photo Quote** page par audit ke liye dikhte hain.
 
 **Rules:**
 - Pehli line: `quotation` / `proforma` + customer naam. Customer naam ka ek hissa bhi chalega (`krishna`), agar wo ek hi customer se match kare. Kai match hon to bot poochega.
@@ -63,6 +76,7 @@ po: 4512
    | `APQMS_TELEGRAM_WEBHOOK_SECRET` | koi bhi lamba random text (e.g. `openssl rand -hex 24`) |
    | `APQMS_TELEGRAM_ALLOWED_CHATS` | aapka chat id (step 4 mein milega). Kai log: `111,222` |
    | `APQMS_TELEGRAM_USER` | app ka username jiske naam se documents banein (default `admin`) |
+   | `ANTHROPIC_API_KEY` | sirf sheet-text feature ke liye (Claude API key) |
 
 3. App restart karo, phir webhook register karo (server par, ek baar):
    ```bash
@@ -175,10 +189,11 @@ python3 apqms_cli.py list proforma
 | `app/assistant/parser.py` | Chat message → intent |
 | `app/assistant/bot.py` | Intent → reply text + PDF |
 | `app/assistant/api.py` | `/api/v1/*` endpoints + OpenAPI spec |
+| `app/assistant/sheet_bot.py` | Paste kiye sheet text ka flow (values → sudhaar → ok → quotation) |
 | `app/assistant/telegram.py` | Telegram webhook / polling |
 | `app/assistant/tokens.py` | API tokens (sirf SHA-256 hash store hota hai) + chat context |
 | `app/views/api_token_pages.py` | Settings → API Tokens page |
 | `apqms_cli.py` | CLI |
-| `tests/test_assistant.py` | Tests: `python3 -m unittest tests.test_assistant -v` |
+| `tests/test_assistant.py`, `tests/test_sheet_bot.py` | Tests: `python3 -m unittest discover -s tests` |
 
 Nayi tables (`api_tokens`, `assistant_context`) pehli baar use hone par apne aap ban jaati hain.

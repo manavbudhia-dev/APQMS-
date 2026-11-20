@@ -10,7 +10,7 @@ data are kept for audit (see app/vision/store.py).
 """
 from database import get_db
 from app.assistant import core
-from app.vision import extractor, store
+from app.vision import confirm, extractor, store
 from app.vision.schema import FIELD_LABELS, MUST_CONFIRM, REQUIRED_FIELDS, empty_extraction
 from utils.http_utils import (UploadedFile, consume_csrf_token, esc, file_response, html_response,
                               new_csrf_token, redirect)
@@ -156,9 +156,15 @@ class VisionPagesMixin:
         if row is None or not consume_csrf_token(form.get('csrf_token', '')):
             return self.send(*redirect('/photo-quote'))
         if row['status'] != store.STATUS_CONFIRMED:
-            data = store.read_image(row)
-            if data:
-                self._run_extraction(rid, data)
+            if row.get('source') == 'text':
+                try:
+                    store.save_result(rid, extractor.extract_text(row.get('source_text') or ''))
+                except extractor.ExtractionError as e:
+                    store.save_error(rid, e.message, e.raw_text)
+            else:
+                data = store.read_image(row)
+                if data:
+                    self._run_extraction(rid, data)
         return self.send(*redirect(f'/photo-quote/{rid}'))
 
     def handle_photo_delete(self, rid, form, user_id):
@@ -266,15 +272,21 @@ class VisionPagesMixin:
                  f'attempts: {esc(row["attempts"] or "-")} · SHA-256: {esc((row["image_sha256"] or "")[:16])}…'
                  f' · uploaded {esc(row["created_at"] or "")}</small>')
 
+        if row.get('source') == 'text':
+            source_html = ('<h6>Pasted text (Telegram)</h6><pre style="white-space:pre-wrap;max-height:70vh;'
+                           'overflow:auto;background:#F9FAFB;padding:12px;border-radius:8px">'
+                           f'{esc(row.get("source_text") or "")}</pre>')
+        else:
+            source_html = (f'<a href="/photo-quote/{rid}/image" target="_blank" title="Open full size">'
+                           f'<img src="/photo-quote/{rid}/image" alt="Uploaded quotation sheet" '
+                           'style="width:100%;height:auto;border-radius:8px;border:1px solid #E5E7EB"></a>'
+                           '<small class="text-muted">Photo par click karke full size mein dekhein.</small>')
         content = f'''
 {top}
 <div class="row g-4">
   <div class="col-lg-6">
     <div class="form-section" style="position:sticky;top:80px">
-      <a href="/photo-quote/{rid}/image" target="_blank" title="Open full size">
-        <img src="/photo-quote/{rid}/image" alt="Uploaded quotation sheet"
-             style="width:100%;height:auto;border-radius:8px;border:1px solid #E5E7EB"></a>
-      <small class="text-muted">Photo par click karke full size mein dekhein.</small>
+{source_html}
       {side_forms}
       {audit}
     </div>
@@ -312,12 +324,7 @@ class VisionPagesMixin:
             else:
                 v = raw[:2000] or None
             _set(values, path, v)
-        for f in REQUIRED_FIELDS:
-            if values.get(f) in (None, ''):
-                errors.append(f'{FIELD_LABELS[f]} zaroori hai.')
-        for f in ('rate_per_mtr', 'quantity_mtrs', 'delivery_weeks'):
-            if values.get(f) is not None and values[f] <= 0:
-                errors.append(f'{FIELD_LABELS[f]} 0 se zyada honi chahiye.')
+        errors += confirm.check_values(values)
         ticked = {name for name, path, _ in _FIELDS
                   if path in MUST_CONFIRM and form.get(f'confirm_{name}') == '1'}
         for name, path, _ in _FIELDS:
@@ -339,44 +346,9 @@ class VisionPagesMixin:
         if errors:
             return again()
 
-        # Claim the row so a double-click can't create two quotations.
-        db = get_db()
         try:
-            claimed = db.execute("UPDATE vision_extractions SET status='confirming' WHERE id=? "
-                                 "AND quotation_id IS NULL AND status IN (?,?)",
-                                 (rid, store.STATUS_EXTRACTED, store.STATUS_FAILED)).rowcount
-            db.commit()
-        finally:
-            db.close()
-        if not claimed:
-            return self.send(*redirect(f'/photo-quote/{rid}'))
-
-        payload = store.quotation_payload(values)
-        payload['customer_id'] = customer_id
-        note = f'Created from Photo Quote #{rid} ({row["original_filename"] or "photo"}).'
-        if values.get('original_rate_per_mtr') is not None:
-            note += (f' Rate on sheet revised from {_fmt(values["original_rate_per_mtr"])} '
-                     f'to {_fmt(values["rate_per_mtr"])} per mtr.')
-        payload['notes'] = note
-        try:
-            doc = core.create_document('quotation', payload, user_id)
-        except core.AssistantError as e:
-            db = get_db()
-            try:
-                db.execute("UPDATE vision_extractions SET status=? WHERE id=?",
-                           (row['status'], rid))
-                db.commit()
-            finally:
-                db.close()
-            errors.append(e.message)
+            doc = confirm.create_quotation(rid, values, customer_id, user_id)
+        except confirm.ConfirmError as e:
+            errors.extend(e.errors)
             return again()
-        if values.get('gst_percent') is not None and values['gst_percent'] != core.GST_PERCENT:
-            db = get_db()
-            try:
-                db.execute("UPDATE quotation_items SET gst_percent=? WHERE quotation_id=?",
-                           (values['gst_percent'], doc['id']))
-                db.commit()
-            finally:
-                db.close()
-        store.mark_confirmed(rid, values, user_id, doc['id'])
         return self.send(*redirect(f'/quotations/{doc["id"]}'))

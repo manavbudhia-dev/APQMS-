@@ -17,6 +17,7 @@ import json
 import os
 import re
 import sys
+import threading
 import traceback
 
 from app.assistant import bot, core, telegram, tokens
@@ -101,7 +102,10 @@ class AssistantApiMixin:
             except (UnicodeDecodeError, ValueError):
                 update = {}
             if isinstance(update, dict):
-                telegram.handle_update(update)
+                if telegram.ASYNC_WEBHOOK:
+                    threading.Thread(target=telegram.handle_update, args=(update,), daemon=True).start()
+                else:
+                    telegram.handle_update(update)
             return self._api_json({'ok': True})    # always 200 so Telegram doesn't retry forever
 
         user = tokens.authenticate(self.headers.get('Authorization'))

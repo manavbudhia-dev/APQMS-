@@ -2,6 +2,8 @@
 
 Sidebar → **Photo Quote**. Upload a photo of the printed sheet with handwritten edits. Claude reads the final values (struck-out values ignored, handwritten replacements used), you check them, and the app makes a normal quotation with its PDF.
 
+**Phone se, sirf text:** the same extraction also works from text copied off the sheet on a phone and pasted into the Telegram bot. See *Quotation sheet ka text paste karna* in `ASSISTANT_API.md`. Those entries show up on the Photo Quote page with the pasted text instead of a photo.
+
 ## Setup
 
 ```bash

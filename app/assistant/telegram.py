@@ -34,6 +34,10 @@ import uuid
 from app.assistant import bot, core
 
 API = 'https://api.telegram.org'
+# Webhook updates are handled on a background thread so a slow step (AI
+# reading a pasted sheet takes 20-40 s) never makes Telegram time out and
+# re-deliver the same message. Tests switch this off.
+ASYNC_WEBHOOK = True
 MAX_MESSAGE = 4000          # Telegram's limit is 4096 characters
 
 
@@ -116,7 +120,8 @@ def handle_update(update):
             _call('sendChatAction', {'chat_id': chat_id, 'action': 'typing'}, timeout=10)
         except Exception:
             pass
-        reply = bot.handle(text, user, chat_key=f'tg:{chat_id}')
+        reply = bot.handle(text, user, chat_key=f'tg:{chat_id}',
+                           notify=lambda t: send_text(chat_id, t))
         send_reply(chat_id, reply)
     except Exception:
         traceback.print_exc(file=sys.stderr)

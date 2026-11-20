@@ -21,7 +21,8 @@ import os
 import re
 from dataclasses import dataclass, field
 
-from app.vision.prompt import RETRY_PROMPT, SYSTEM_PROMPT, USER_PROMPT
+from app.vision.prompt import (RETRY_PROMPT, SYSTEM_PROMPT, TEXT_SYSTEM_PROMPT, TEXT_USER_PROMPT,
+                               USER_PROMPT)
 from app.vision.schema import (ATTACHMENT_NUMERIC, EXTRACTION_SCHEMA, NUMERIC_FIELDS, REQUIRED_FIELDS,
                                TEXT_FIELDS, empty_extraction)
 
@@ -40,6 +41,7 @@ EFFORT = os.environ.get('APQMS_VISION_EFFORT', 'high')
 MAX_UPLOAD_BYTES = 20 * 1024 * 1024          # what a user may upload
 MAX_API_IMAGE_BYTES = 5 * 1024 * 1024        # per-image limit of the API (after base64 decode)
 MAX_EDGE_PX = 2400                           # long edge after downscaling
+MAX_TEXT_CHARS = 8000
 FALLBACK_BETA = 'server-side-fallback-2026-07-01'
 
 _MAGIC = [(b'\xff\xd8\xff', 'image/jpeg'), (b'\x89PNG\r\n\x1a\n', 'image/png'),
@@ -231,13 +233,13 @@ def _text_of(response):
     return ''.join(b.text for b in response.content if getattr(b, 'type', '') == 'text')
 
 
-def _call(client, messages):
+def _call(client, messages, system=SYSTEM_PROMPT):
     return client.beta.messages.create(
         model=MODEL,
         max_tokens=16000,
         betas=[FALLBACK_BETA],
         fallbacks='default',          # a safety decline re-runs on Anthropic's recommended model
-        system=[{'type': 'text', 'text': SYSTEM_PROMPT, 'cache_control': {'type': 'ephemeral'}}],
+        system=[{'type': 'text', 'text': system, 'cache_control': {'type': 'ephemeral'}}],
         output_config={'effort': EFFORT,
                        'format': {'type': 'json_schema', 'schema': EXTRACTION_SCHEMA}},
         messages=messages,
@@ -271,11 +273,36 @@ def extract(image_bytes, client=None, do_preprocess=True):
                                      'data': base64.standard_b64encode(img).decode('ascii')}},
         {'type': 'text', 'text': USER_PROMPT},
     ]}]
+    return _run(client, messages, SYSTEM_PROMPT, changed)
+
+
+def extract_text(text, client=None):
+    """Same extraction from text the user copied off the sheet with their
+    phone (Google Lens etc.) instead of from the photo. Strikethroughs are
+    lost in copied text, so the prompt tells the model to flag every field
+    where an old and a new value both appear."""
+    if client is None:
+        ok, reason = available()
+        if not ok:
+            raise ExtractionError(reason)
+        client = anthropic.Anthropic()
+    text = (text or '').strip()
+    if len(text) < 20:
+        raise ExtractionError('Text bahut chhota hai — poori sheet ka text paste karein.')
+    if len(text) > MAX_TEXT_CHARS:
+        raise ExtractionError(f'Text bahut lamba hai (max {MAX_TEXT_CHARS} characters).')
+    messages = [{'role': 'user', 'content': [
+        {'type': 'text', 'text': TEXT_USER_PROMPT + '\n\n<copied_text>\n' + text + '\n</copied_text>'},
+    ]}]
+    return _run(client, messages, TEXT_SYSTEM_PROMPT, False)
+
+
+def _run(client, messages, system, changed):
     usage = {'input_tokens': 0, 'output_tokens': 0}
     last_text, last_err = '', ''
     for attempt in (1, 2):
         try:
-            response = _call(client, messages)
+            response = _call(client, messages, system)
         except Exception as e:
             raise ExtractionError(_api_error_message(e)) from e
         u = getattr(response, 'usage', None)
@@ -283,8 +310,8 @@ def extract(image_bytes, client=None, do_preprocess=True):
             usage['input_tokens'] += getattr(u, 'input_tokens', 0) or 0
             usage['output_tokens'] += getattr(u, 'output_tokens', 0) or 0
         if response.stop_reason == 'refusal':
-            raise ExtractionError('The AI model declined to read this image. Please enter the values '
-                                  'manually or try a different photo.')
+            raise ExtractionError('The AI model declined to read this sheet. Please enter the values '
+                                  'manually or try again.')
         if response.stop_reason == 'max_tokens':
             last_err = 'output was cut off'
         last_text = _text_of(response)

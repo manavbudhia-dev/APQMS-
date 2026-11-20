@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from app.assistant import core, tokens
+from app.assistant import core, sheet_bot, tokens
 from app.assistant.core import PROFORMA, QUOTATION, AssistantError
 from app.assistant.parser import parse
 from app.generators.pdf_generator import _indian_format
@@ -36,7 +36,11 @@ AQ-2026-012 pdf  |  AQ-2026-012  |  AQ-2026-012 status sent / confirm / cancel
 quotations  |  recent proforma  |  confirmed quotations
 customer krishna  |  item chain 25.4  |  summary
 
-6) Naya customer:
+6) Sheet ka text (phone camera / Google Lens se copy karke yahan paste karein):
+bot values padhega, aap check karke likhein:  ok Krishna Sugar Mills
+galti ho to:  rate 8360  |  delivery 8  |  cancel
+
+7) Naya customer:
 add customer Shree Ram Sugars
 contact: Ramesh   phone: 98xxxxxxx   gstin: 09XXXXX
 
@@ -106,10 +110,18 @@ def _with_pdf(doc, text, attach):
     return Reply(text, pdf=pdf, pdf_name=name, data={'document': doc})
 
 
-def handle(text, user, chat_key=None, attach_pdf=True):
+def handle(text, user, chat_key=None, attach_pdf=True, notify=None):
     """user: dict with at least 'id'. chat_key: identifies the conversation
-    for "isko / last" follow-ups (e.g. 'tg:12345')."""
+    for "isko / last" follow-ups (e.g. 'tg:12345'). notify(text), if given,
+    sends an interim message (e.g. "reading the sheet…") before a slow step."""
     try:
+        # A sheet pasted earlier and still waiting for "ok" / corrections?
+        r = sheet_bot.handle_pending(text, user, chat_key, attach_pdf)
+        if r is not None:
+            return r
+        # Text copied off a hand-edited quotation sheet -> AI extraction.
+        if sheet_bot.looks_like_sheet(text):
+            return sheet_bot.start(text, user, chat_key, notify)
         return _handle(text, user, chat_key, attach_pdf)
     except AssistantError as e:
         return Reply('⚠️ ' + e.message, ok=False, data=e.to_dict())

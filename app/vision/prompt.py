@@ -38,3 +38,30 @@ USER_PROMPT = ("Extract the final values from this quotation sheet. Apply the st
 
 RETRY_PROMPT = ("Your previous answer was not valid JSON for the schema ({error}). Answer again with "
                 "only the JSON object.")
+
+
+# ── text copied from the sheet on a phone (Google Lens, camera "copy text") ──
+TEXT_SYSTEM_PROMPT = """You read text that a salesperson copied from a photographed quotation sheet with their phone's text recognition (for example Google Lens), and return the final, correct values as JSON matching the provided schema.
+
+The sheet is a printed template for an industrial chain manufacturer that was edited by hand. The copied text is plain OCR output, so it has these known problems:
+- Strikethroughs are lost. A struck-out printed value and its handwritten replacement both appear, often next to each other or on nearby lines. Example: "Rate: Rs. 7600/- per mtr" and "8360/-" both appear; the printed one (inside the template sentence) is the old value and the separate handwritten-looking one is the new value.
+- Handwriting is garbled. "8360/- per mt." can come out as "83601-bent."; "/-" is often read as "1-", "I-" or "l-"; "mt" as "nt"; words in notes may be broken.
+- Reading order is scrambled, and text from other papers, letterheads, addresses, stamps or GST numbers at the edges of the photo is mixed in (for example "AYPEE IN...", address fragments, codes such as "A106G1Z4", single stray letters).
+
+How to decide:
+- Prefer the handwritten replacement over the printed template value when both are present for the same field. Put the old printed rate in original_rate_per_mtr.
+- Because you cannot see the strikethrough, you can never be certain which value is current. For EVERY field where two candidate values appear (rate, delivery, payment, quantity or any other), give your best reading AND add a needs_review entry naming both candidates, for example {"field": "rate_per_mtr", "reason": "both 7600 (printed) and 8360 (handwritten) appear; used 8360"}.
+- When you repair garbled text into a value (for example "83601-bent." -> 8360), add a needs_review entry that quotes the original text.
+- A handwritten figure near a printed range (for example "5-6" and "8" near "weeks") is usually the replacement: delivery_weeks 8, flagged in needs_review.
+- If a payment line shows several percentages (for example "20 25% advance"), the last handwritten one is usually current; flag it.
+- Handwritten notes (for example "Note: In your inquiry ...") go into notes as one or two clear English sentences; translate Hindi or Punjabi.
+- Ignore text that belongs to other papers or letterheads.
+
+Field rules:
+- Numbers are plain numbers: 8360, not "8360/-". Quantities are metres, rates are rupees per metre, widths, heights and thicknesses are millimetres.
+- payment_terms is short and plain, for example "25% advance, balance as used in one month". price_basis is like "Ex Factory Jalandhar". attachment.material is the material offered, for example "EN8D" from "MOC-EN8D".
+- If a field is not in the text, use null. Never invent a value that is not supported by the text.
+- Prices, quantities and delivery are costly to get wrong: flag them whenever there is any doubt."""
+
+TEXT_USER_PROMPT = ("Extract the final values from this text copied off a hand-edited quotation sheet. "
+                    "Strikethroughs are lost, so flag every field where an old and a new value both appear.")
