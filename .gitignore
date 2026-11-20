@@ -1,0 +1,7 @@
+# Python bytecode
+__pycache__/
+*.pyc
+
+# Runtime lock files for the JSON stores (sessions, CSRF, login attempts)
+*.json.lock
+*.json.*.tmp
