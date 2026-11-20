@@ -13,6 +13,18 @@ Set `ANTHROPIC_API_KEY` in the server environment (cPanel: *Setup Python App →
 
 Optional settings: `APQMS_VISION_MODEL` (default `claude-opus-5-5`), `APQMS_VISION_EFFORT` (default `high`).
 
+**Third-party gateway** (your own base URL, key and model), in `.env`:
+```
+APQMS_AI_BASE_URL=https://your-gateway.example.com     # with or without a trailing /v1
+APQMS_AI_API_KEY=your-gateway-key
+APQMS_AI_MODEL=model-name-as-your-gateway-spells-it
+APQMS_AI_COMPAT=auto
+```
+- The gateway must speak the **Anthropic Messages API** (`POST <base>/v1/messages`).
+- The key is sent both as `x-api-key` and as `Authorization: Bearer`, with `anthropic-version: 2023-06-01`.
+- Gateways often reject Anthropic's newer request fields (fallbacks, structured outputs, prompt caching). With `auto`, the first such rejection switches the app to a basic request, with the JSON schema written into the prompt. The parsing and validation still apply.
+- Check the setup with **Photo Quote → Test AI connection** (admin) or `python3 apqms_cli.py ai-test`. Each test sends one sample sheet (1 paid call).
+
 ## Flow
 
 1. **Upload**: JPG, PNG or WebP, up to 20 MB. The phone camera opens directly. Each user can run 30 extractions per hour.

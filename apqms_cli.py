@@ -293,6 +293,24 @@ def cmd_telegram(args):
     return 0
 
 
+def cmd_ai_test(args):
+    from app.vision import extractor
+    st = extractor.ai_settings()
+    print(f"Base URL : {st['base_url'] or 'Anthropic direct'}")
+    print(f"Model    : {st['model']}")
+    print(f"Key      : {'set (' + st['api_key'][:6] + '…)' if st['api_key'] else 'NOT SET'}")
+    print(f"Compat   : {st['compat']}")
+    ok, reason = extractor.available()
+    if not ok:
+        raise SystemExit(reason)
+    print('Sending a sample sheet…')
+    try:
+        _print_json(extractor.test_connection())
+    except extractor.ExtractionError as e:
+        raise SystemExit(f'FAILED: {e.message}')
+    return 0
+
+
 def main(argv=None):
     p = argparse.ArgumentParser(prog='apqms_cli.py', description='APQMS command line',
                                 formatter_class=argparse.RawDescriptionHelpFormatter, epilog=__doc__)
@@ -355,6 +373,9 @@ def main(argv=None):
     s.add_argument('action', choices=['poll', 'set-webhook', 'delete-webhook', 'info'])
     s.add_argument('base_url', nargs='?')
     s.set_defaults(fn=cmd_telegram)
+
+    s = sub.add_parser('ai-test', help='check the AI key / gateway with one sample extraction')
+    s.set_defaults(fn=cmd_ai_test)
 
     args = p.parse_args(argv)
     return args.fn(args) or 0

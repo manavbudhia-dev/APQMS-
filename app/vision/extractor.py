@@ -36,12 +36,16 @@ try:
 except ImportError:          # preprocessing is skipped without Pillow
     Image = ImageOps = None
 
-MODEL = os.environ.get('APQMS_VISION_MODEL', 'claude-opus-5-5')
 EFFORT = os.environ.get('APQMS_VISION_EFFORT', 'high')
+DEFAULT_MODEL = 'claude-opus-5-5'
+COMPAT_MAX_TOKENS = 8000          # some gateway / older models cap output lower than 16000
 MAX_UPLOAD_BYTES = 20 * 1024 * 1024          # what a user may upload
 MAX_API_IMAGE_BYTES = 5 * 1024 * 1024        # per-image limit of the API (after base64 decode)
 MAX_EDGE_PX = 2400                           # long edge after downscaling
 MAX_TEXT_CHARS = 8000
+COMPAT_JSON_INSTRUCTION = ('\n\nOutput format: reply with ONLY one JSON object (no markdown, no code fences, '
+                           'no other text) that matches this JSON schema exactly:\n'
+                           + json.dumps(EXTRACTION_SCHEMA))
 FALLBACK_BETA = 'server-side-fallback-2026-07-01'
 
 _MAGIC = [(b'\xff\xd8\xff', 'image/jpeg'), (b'\x89PNG\r\n\x1a\n', 'image/png'),
@@ -67,14 +71,68 @@ class ExtractionResult:
     preprocessed: bool = False
 
 
+# ── AI provider settings (Anthropic directly, or a third-party gateway) ──
+#   APQMS_AI_BASE_URL  gateway URL that speaks the Anthropic Messages API
+#                      (requests go to <base>/v1/messages). Empty = Anthropic.
+#   APQMS_AI_API_KEY   key for that gateway (or Anthropic). Falls back to
+#                      ANTHROPIC_API_KEY.
+#   APQMS_AI_MODEL     model name as the gateway spells it. Default claude-opus-5-5.
+#   APQMS_AI_COMPAT    auto (default) | on | off — "on" sends only the basic
+#                      Messages API fields; "auto" does that after the
+#                      gateway rejects the full request once.
+def ai_settings():
+    base = (os.environ.get('APQMS_AI_BASE_URL') or '').strip().rstrip('/')
+    if base.endswith('/v1'):                 # the SDK adds /v1/messages itself
+        base = base[:-3]
+    key = (os.environ.get('APQMS_AI_API_KEY') or os.environ.get('ANTHROPIC_API_KEY') or '').strip()
+    model = (os.environ.get('APQMS_AI_MODEL') or os.environ.get('APQMS_VISION_MODEL') or DEFAULT_MODEL).strip()
+    compat = (os.environ.get('APQMS_AI_COMPAT') or 'auto').strip().lower()
+    if compat not in ('auto', 'on', 'off'):
+        compat = 'auto'
+    try:
+        timeout = float(os.environ.get('APQMS_AI_TIMEOUT') or 120)
+    except ValueError:
+        timeout = 120.0
+    return {'base_url': base, 'api_key': key, 'model': model, 'compat': compat, 'timeout': timeout}
+
+
 def available():
     """(ok, reason) — whether extraction can run on this server."""
     if anthropic is None:
         return False, 'The Anthropic SDK is not installed (pip install -r requirements-vision.txt).'
-    if not (os.environ.get('ANTHROPIC_API_KEY') or os.environ.get('ANTHROPIC_AUTH_TOKEN')
-            or os.environ.get('ANTHROPIC_PROFILE')):
-        return False, 'ANTHROPIC_API_KEY is not set on the server.'
+    st = ai_settings()
+    if not (st['api_key'] or os.environ.get('ANTHROPIC_AUTH_TOKEN') or os.environ.get('ANTHROPIC_PROFILE')):
+        return False, 'AI key is not set (APQMS_AI_API_KEY or ANTHROPIC_API_KEY in .env).'
     return True, ''
+
+
+def make_client():
+    """Anthropic SDK client pointed at Anthropic or at the configured gateway.
+    For a gateway the key goes in both x-api-key and Authorization: Bearer
+    (gateways expect one or the other) with the widely supported
+    anthropic-version header."""
+    st = ai_settings()
+    kwargs = {'timeout': st['timeout'], 'max_retries': 1}
+    if st['base_url']:
+        kwargs['base_url'] = st['base_url']
+        kwargs['default_headers'] = {'x-api-key': st['api_key'], 'Authorization': f"Bearer {st['api_key']}",
+                                     'anthropic-version': '2023-06-01'}
+    if st['api_key']:
+        kwargs['api_key'] = st['api_key']
+    return anthropic.Anthropic(**kwargs)
+
+
+# Remembered per process: True once a gateway rejected the full request.
+_compat_learned = False
+
+
+def _use_compat():
+    st = ai_settings()
+    if st['compat'] == 'on':
+        return True
+    if st['compat'] == 'off':
+        return False
+    return _compat_learned
 
 
 # ── image handling ───────────────────────────────────────────
@@ -233,9 +291,20 @@ def _text_of(response):
     return ''.join(b.text for b in response.content if getattr(b, 'type', '') == 'text')
 
 
-def _call(client, messages, system=SYSTEM_PROMPT):
+def _call(client, messages, system=SYSTEM_PROMPT, compat=False):
+    model = ai_settings()['model']
+    if compat:
+        # Only the basic Messages API fields, which every Anthropic-compatible
+        # gateway accepts; the schema moves into the prompt, and parsing /
+        # validation / the one retry catch any formatting slip.
+        return client.messages.create(
+            model=model,
+            max_tokens=COMPAT_MAX_TOKENS,
+            system=system + COMPAT_JSON_INSTRUCTION,
+            messages=messages,
+        )
     return client.beta.messages.create(
-        model=MODEL,
+        model=model,
         max_tokens=16000,
         betas=[FALLBACK_BETA],
         fallbacks='default',          # a safety decline re-runs on Anthropic's recommended model
@@ -256,7 +325,7 @@ def extract(image_bytes, client=None, do_preprocess=True):
         ok, reason = available()
         if not ok:
             raise ExtractionError(reason)
-        client = anthropic.Anthropic()
+        client = make_client()
     if not image_bytes:
         raise ExtractionError('No photo received.')
     if len(image_bytes) > MAX_UPLOAD_BYTES:
@@ -285,7 +354,7 @@ def extract_text(text, client=None):
         ok, reason = available()
         if not ok:
             raise ExtractionError(reason)
-        client = anthropic.Anthropic()
+        client = make_client()
     text = (text or '').strip()
     if len(text) < 20:
         raise ExtractionError('Text bahut chhota hai — poori sheet ka text paste karein.')
@@ -301,10 +370,22 @@ def _run(client, messages, system, changed):
     usage = {'input_tokens': 0, 'output_tokens': 0}
     last_text, last_err = '', ''
     for attempt in (1, 2):
+        global _compat_learned
+        compat = _use_compat()
         try:
-            response = _call(client, messages, system)
+            response = _call(client, messages, system, compat)
         except Exception as e:
-            raise ExtractionError(_api_error_message(e)) from e
+            if (not compat and ai_settings()['compat'] == 'auto' and anthropic is not None
+                    and isinstance(e, (anthropic.BadRequestError, anthropic.UnprocessableEntityError))):
+                # The gateway didn't accept a newer field (fallbacks, betas,
+                # output_config, cache_control...). Send the basic request.
+                _compat_learned = True
+                try:
+                    response = _call(client, messages, system, True)
+                except Exception as e2:
+                    raise ExtractionError(_api_error_message(e2)) from e2
+            else:
+                raise ExtractionError(_api_error_message(e)) from e
         u = getattr(response, 'usage', None)
         if u is not None:
             usage['input_tokens'] += getattr(u, 'input_tokens', 0) or 0
@@ -331,7 +412,7 @@ def _run(client, messages, system, changed):
                                   'Please try again or enter the values manually.', raw_text=last_text)
         data, _problems = validate(parsed)
         return ExtractionResult(data=data, raw_text=last_text,
-                                model=getattr(response, 'model', MODEL) or MODEL,
+                                model=getattr(response, 'model', None) or ai_settings()['model'],
                                 attempts=attempt, usage=usage, preprocessed=changed)
     raise ExtractionError('Extraction failed.', raw_text=last_text)     # not reached
 
@@ -339,19 +420,53 @@ def _run(client, messages, system, changed):
 def _api_error_message(e):
     if anthropic is None:
         return 'AI service error.'
+    detail = str(getattr(e, 'message', '') or e)[:300]
+    gw = ' (gateway)' if ai_settings()['base_url'] else ''
     if isinstance(e, anthropic.AuthenticationError):
-        return 'The server\'s Anthropic API key is invalid.'
+        return f'AI key galat hai ya expire ho gayi{gw}: {detail}'
     if isinstance(e, anthropic.PermissionDeniedError):
-        return 'The Anthropic API key is not allowed to use this model.'
+        return f'Is key ko ye model use karne ki permission nahi{gw}: {detail}'
+    if isinstance(e, anthropic.NotFoundError):
+        return (f'AI service ne 404 diya{gw} — base URL ya model ka naam galat hai '
+                f'(model: {ai_settings()["model"]}): {detail}')
     if isinstance(e, anthropic.RateLimitError):
-        return 'The AI service is busy (rate limit). Please try again in a minute.'
+        return f'AI service busy hai / limit poori{gw}. Ek minute baad try karein. {detail}'
     if isinstance(e, anthropic.BadRequestError):
-        return f'The AI service rejected the request: {getattr(e, "message", e)}'
+        return f'AI service ne request reject ki{gw}: {detail}'
     if isinstance(e, anthropic.APIStatusError):
-        return f'AI service error ({e.status_code}). Please try again.'
+        return f'AI service error {e.status_code}{gw}: {detail}'
+    if isinstance(e, anthropic.APITimeoutError):
+        return f'AI service ne time par jawab nahi diya{gw}. Dobara try karein.'
     if isinstance(e, anthropic.APIConnectionError):
-        return 'Could not reach the AI service. Check the server\'s internet connection.'
-    return 'Unexpected error while reading the photo.'
+        where = ai_settings()['base_url'] or 'api.anthropic.com'
+        return f'AI service tak connection nahi bana ({where}). URL check karein, ya hosting outgoing HTTPS block kar rahi hai.'
+    return f'Unexpected error while reading the sheet: {detail}'
+
+
+SAMPLE_SHEET_TEXT = """Forged Type Chain Pitch 142mm (Heavy Duty)
+Link forged from 20MnCr5 Hardened & Tempered
+Pin (20MnCr5) 25mm with lock washer both sides
+Attachment (MOC-EN8D) Height 98mm Thickness 10mm
+Total Width 471mm
+Quantity: 70 mtrs
+Rate: Rs. 7600/- per mtr 83601-bent.
+GST 18% extra  Rates ex Factory Jalandhar
+Delivery: 5-6 8 weeks from date of order
+Payment: 100% on delivery 20 25% advance & balance as used in one month"""
+
+
+def test_connection(client=None):
+    """One real extraction of a small built-in sample. -> dict for display.
+    Raises ExtractionError with a readable reason."""
+    st = ai_settings()
+    res = extract_text(SAMPLE_SHEET_TEXT, client=client)
+    return {'ok': True, 'base_url': st['base_url'] or 'https://api.anthropic.com (direct)',
+            'model_requested': st['model'], 'model_reported': res.model,
+            'mode': 'compatibility (basic request)' if _use_compat() else 'full',
+            'rate_per_mtr': res.data.get('rate_per_mtr'), 'quantity_mtrs': res.data.get('quantity_mtrs'),
+            'delivery_weeks': res.data.get('delivery_weeks'),
+            'needs_review': len(res.data.get('needs_review') or []),
+            'tokens': res.usage}
 
 
 def compare(extracted, truth):

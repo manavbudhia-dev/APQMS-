@@ -293,6 +293,8 @@ class RoutingMixin:
         # Settings
         (re.compile(r'^/settings/api-tokens$'),
          lambda self, m, form, uid: self.handle_api_token_create(form, uid)),
+        (re.compile(r'^/photo-quote/ai-test$'),
+         lambda self, m, form, uid: self.handle_ai_test(form, uid)),
         (re.compile(r'^/photo-quote/upload$'),
          lambda self, m, form, uid: self.handle_photo_upload(form, uid)),
         (re.compile(r'^/photo-quote/(\d+)/confirm$'),

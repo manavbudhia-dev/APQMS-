@@ -54,7 +54,7 @@ po: 4512
 4. Galti ho to sudhaaro: `rate 8360`, `qty 70`, `delivery 8`, `payment 25% advance, balance in one month`, `gst 18`, `width 471`, `height 98`, `customer Krishna Sugar` (ek message mein kai lines bhi chalengi).
 5. Sab sahi ho to: `ok Krishna Sugar Mills` → quotation ban jaati hai aur PDF chat mein aa jaati hai. Phir `isko proforma bana do` bhi chalega. Chhodna ho to: `cancel`.
 
-Copy kiye text mein strikethrough nahi hota, isliye purani aur nayi dono values aa jaati hain. Bot apna best guess dikhata hai, par **final faisla aapka "ok"** hai. Ise `ANTHROPIC_API_KEY` aur `pip install -r requirements-vision.txt` chahiye (neeche Telegram setup dekhein). Har pasted sheet ek paid API call hai. Pasted text, AI output, aapke sudhaar aur final values sab app mein **Photo Quote** page par audit ke liye dikhte hain.
+Copy kiye text mein strikethrough nahi hota, isliye purani aur nayi dono values aa jaati hain. Bot apna best guess dikhata hai, par **final faisla aapka "ok"** hai. Ise AI key (Anthropic ki, ya third-party gateway ki base URL + key + model — `PHOTO_QUOTE.md` dekhein) aur `pip install -r requirements-vision.txt` chahiye (neeche Telegram setup dekhein). Har pasted sheet ek paid API call hai. Pasted text, AI output, aapke sudhaar aur final values sab app mein **Photo Quote** page par audit ke liye dikhte hain.
 
 **Rules:**
 - Pehli line: `quotation` / `proforma` + customer naam. Customer naam ka ek hissa bhi chalega (`krishna`), agar wo ek hi customer se match kare. Kai match hon to bot poochega.
@@ -76,7 +76,7 @@ Copy kiye text mein strikethrough nahi hota, isliye purani aur nayi dono values 
    | `APQMS_TELEGRAM_WEBHOOK_SECRET` | koi bhi lamba random text (e.g. `openssl rand -hex 24`) |
    | `APQMS_TELEGRAM_ALLOWED_CHATS` | aapka chat id (step 4 mein milega). Kai log: `111,222` |
    | `APQMS_TELEGRAM_USER` | app ka username jiske naam se documents banein (default `admin`) |
-   | `ANTHROPIC_API_KEY` | sirf sheet-text feature ke liye (Claude API key) |
+   | `APQMS_AI_BASE_URL`, `APQMS_AI_API_KEY`, `APQMS_AI_MODEL` | sheet-text feature ke liye: gateway ka URL, key, model (ya seedha Anthropic: sirf `ANTHROPIC_API_KEY`) |
 
 3. App restart karo, phir webhook register karo (server par, ek baar):
    ```bash

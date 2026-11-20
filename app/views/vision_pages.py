@@ -89,6 +89,21 @@ class VisionPagesMixin:
                      f'<td>{esc(r["created_at"] or "")}</td><td>{state}</td></tr>')
         if not rows:
             rows = '<tr><td colspan="5" class="text-muted">Abhi koi photo upload nahi hui.</td></tr>'
+        ai_box = ''
+        if self._is_admin(user_id):
+            st = extractor.ai_settings()
+            ai_box = f'''
+<div class="form-section mt-4">
+  <h5><i class="bi bi-plug"></i> AI connection</h5>
+  <div class="small mb-2">Base URL: <code>{esc(st['base_url'] or 'Anthropic direct')}</code> ·
+    Model: <code>{esc(st['model'])}</code> · Key: {'set' if st['api_key'] else '<b class="text-danger">not set</b>'} ·
+    Compat: <code>{esc(st['compat'])}</code></div>
+  <form method="post" action="/photo-quote/ai-test" onsubmit="this.querySelector('button').disabled=true;this.querySelector('button').innerText='Testing… (20-40 sec)';">
+    <input type="hidden" name="csrf_token" value="{esc(csrf)}">
+    <button class="btn btn-sm btn-outline-primary" {"disabled" if not ok else ""}><i class="bi bi-lightning"></i> Test AI connection</button>
+  </form>
+  <small class="text-muted">Ek sample sheet bhej kar dekhta hai ki key / gateway / model sahi hai (1 paid call).</small>
+</div>'''
         content = f'''
 {alert}
 <div class="form-section">
@@ -107,6 +122,7 @@ class VisionPagesMixin:
     <small class="text-muted">Tips: poora page frame mein, seedha upar se, achhi roshni. JPG/PNG, 20 MB tak.</small>
   </form>
 </div>
+{ai_box}
 <div class="form-section mt-4">
   <h5>Recent</h5>
   <div class="table-responsive"><table class="table table-sm mb-0">
@@ -114,6 +130,18 @@ class VisionPagesMixin:
     <tbody>{rows}</tbody></table></div>
 </div>'''
         return self._layout('Photo Quote', 'Photo Quote', content, 'photo')
+
+    def handle_ai_test(self, form, user_id):
+        if not self._is_admin(user_id) or not consume_csrf_token(form.get('csrf_token', '')):
+            return self.send(*redirect('/photo-quote'))
+        try:
+            r = extractor.test_connection()
+        except extractor.ExtractionError as e:
+            return self.send(*html_response(self.pg_photo_quote(user_id, 'AI test FAILED: ' + e.message, err=True)))
+        msg = (f"AI test OK ✅ — model {r['model_reported']} via {r['base_url']} ({r['mode']} mode). "
+               f"Sample se padha: rate {r['rate_per_mtr']}, qty {r['quantity_mtrs']}, "
+               f"delivery {r['delivery_weeks']} weeks, {r['needs_review']} doubts flagged.")
+        return self.send(*html_response(self.pg_photo_quote(user_id, msg)))
 
     def handle_photo_upload(self, form, user_id):
         def fail(message):
