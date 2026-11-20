@@ -20,6 +20,12 @@ You need (one time, ~20 minutes): cPanel access and the GitHub repo's Settings p
 
 > If `id_rsa` already exists and is used for something else, ask me — it then needs a `~/.ssh/config` file.
 
+> **cPanel says "password field can't be empty"?** Some hosts force a key password, and cPanel's Git cannot use such a key (the clone log shows `Permission denied (publickey)`). Make the key with the script instead:
+> 1. File Manager → upload `tools/make_deploy_key.py` into the app folder (`QMS`).
+> 2. Setup Python App → your app → **Execute python script**: `make_deploy_key.py` → **Run Script**.
+> 3. The script creates `~/.ssh/apqms_deploy` (ed25519, no password) and tells SSH to use it for GitHub (`~/.ssh/config`). It prints the public key and also saves it to `~/apqms_deploy_key_PUBLIC.txt`.
+> 4. Use that public key in Step 2. Delete any older deploy key on GitHub first.
+
 ## Step 2 — Add that key to GitHub as a Deploy key
 1. GitHub → repo **APQMS-** → **Settings** → **Deploy keys** → **Add deploy key**.
 2. Title: `cPanel MilesWeb`. Key: paste. **Leave "Allow write access" unticked.** Click **Add key**.
