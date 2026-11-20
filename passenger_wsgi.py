@@ -90,6 +90,8 @@ def application(environ, start_response):
             handler.do_GET()
         elif handler.command == 'POST':
             handler.do_POST()
+        elif handler.command == 'OPTIONS':
+            handler.do_OPTIONS()
         else:
             handler.send(b'Method Not Allowed', 405, [('Content-Type', 'text/plain')])
     except Exception:

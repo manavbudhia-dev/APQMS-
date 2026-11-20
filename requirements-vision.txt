@@ -1,0 +1,13 @@
+# Optional dependencies for Photo Quote (/photo-quote): read a photo of a
+# hand-edited quotation sheet with Claude and turn it into a quotation.
+# Nothing else in the app needs these; without them /photo-quote shows a
+# setup hint and every other page works as before.
+#
+#   pip install -r requirements-vision.txt
+#
+# Also set ANTHROPIC_API_KEY in the server's environment (cPanel: Setup
+# Python App -> Environment variables). Optional: APQMS_VISION_MODEL
+# (default claude-opus-5-5), APQMS_VISION_EFFORT (default high).
+anthropic>=2.11,<3
+# Auto-rotate (EXIF), contrast boost and downscaling of phone photos.
+pillow>=10,<13
