@@ -1,0 +1,24 @@
+---
+# cPanel Git deployment ("Deploy HEAD Commit", or the GitHub Action that
+# calls it — see .github/workflows/deploy.yml and DEPLOY_CPANEL.md).
+#
+# Copies ONLY code from the cPanel repository clone into the live app
+# folder. Never touched: quotation.db (live data), .env (keys), uploads,
+# and the runtime JSON stores in utils/ (sessions, CSRF, login attempts).
+# No catch-all wildcards (cPanel warns they can copy .git).
+#
+# Live app folder = "Application root" in Setup Python App. Change QMS
+# below if yours is different.
+deployment:
+  tasks:
+    - export DEPLOYPATH=~/QMS
+    - /bin/mkdir -p $DEPLOYPATH/utils $DEPLOYPATH/tmp
+    - /bin/cp -R app static templates tools $DEPLOYPATH/
+    - /bin/cp utils/*.py $DEPLOYPATH/utils/
+    - /bin/cp server.py database.py passenger_wsgi.py apqms_cli.py $DEPLOYPATH/
+    - /bin/cp requirements.txt requirements-vision.txt requirements-ocr.txt requirements-ml.txt $DEPLOYPATH/
+    - /bin/cp README.md ASSISTANT_API.md PHOTO_QUOTE.md DEPLOY_CPANEL.md .env.example $DEPLOYPATH/
+    # Install / update Python packages in the app's virtualenv (path made by Setup Python App).
+    - for PIP in ~/virtualenv/QMS/*/bin/pip; do [ -x "$PIP" ] && "$PIP" install -q -r $DEPLOYPATH/requirements.txt -r $DEPLOYPATH/requirements-vision.txt || true; done
+    # Tell Passenger to restart the app.
+    - /bin/touch $DEPLOYPATH/tmp/restart.txt

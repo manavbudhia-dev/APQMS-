@@ -20,13 +20,28 @@ jobs:
         id: check
         env:
           HOST: ${{ secrets.SERVER_HOST }}
+          CPANEL_HOST: ${{ secrets.CPANEL_HOST }}
         run: |
-          if [ -z "$HOST" ]; then
-            echo "::warning::SERVER_HOST / SERVER_USER / SSH_PRIVATE_KEY secrets set nahi hain - deploy skip."
-            echo "ok=false" >> "$GITHUB_OUTPUT"
-          else
-            echo "ok=true" >> "$GITHUB_OUTPUT"
+          # cPanel shared hosting (no SSH): CPANEL_HOST / CPANEL_USER / CPANEL_API_TOKEN — see DEPLOY_CPANEL.md
+          # Own server with SSH:          SERVER_HOST / SERVER_USER / SSH_PRIVATE_KEY
+          echo "cpanel=$([ -n "$CPANEL_HOST" ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+          echo "ok=$([ -n "$HOST" ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+          if [ -z "$HOST" ] && [ -z "$CPANEL_HOST" ]; then
+            echo "::warning::Deploy secrets set nahi hain (CPANEL_* ya SERVER_*) - deploy skip. DEPLOY_CPANEL.md dekhein."
           fi
+
+      - name: Checkout (for the cPanel deploy script)
+        if: steps.check.outputs.cpanel == 'true'
+        uses: actions/checkout@v4
+
+      - name: Deploy to cPanel (Git Version Control + API token)
+        if: steps.check.outputs.cpanel == 'true'
+        env:
+          CPANEL_HOST: ${{ secrets.CPANEL_HOST }}
+          CPANEL_USER: ${{ secrets.CPANEL_USER }}
+          CPANEL_API_TOKEN: ${{ secrets.CPANEL_API_TOKEN }}
+          CPANEL_REPO_ROOT: ${{ vars.CPANEL_REPO_ROOT }}
+        run: python3 tools/cpanel_deploy.py "$GITHUB_SHA"
 
       - name: Deploy over SSH
         if: steps.check.outputs.ok == 'true'
