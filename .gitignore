@@ -1,14 +1,7 @@
-# Python bytecode
 __pycache__/
 *.pyc
-
-# Runtime lock files for the JSON stores (sessions, CSRF, login attempts)
-*.json.lock
-*.json.*.tmp
-
-# Uploaded photos (audit copies) — live data, never commit
-vision_uploads/
-ocr_uploads/
-
-# Local settings with secrets (see .env.example)
+*.db
+*.db-wal
+*.db-shm
+ADMIN_CREDENTIALS.txt
 .env
