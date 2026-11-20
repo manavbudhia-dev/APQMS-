@@ -7,6 +7,8 @@ Telegram) plus, where it makes sense, a PDF and the structured document.
 """
 from __future__ import annotations
 
+import re
+
 from dataclasses import dataclass, field
 
 from app.assistant import core, sheet_bot, tokens
@@ -115,6 +117,10 @@ def handle(text, user, chat_key=None, attach_pdf=True, notify=None):
     for "isko / last" follow-ups (e.g. 'tg:12345'). notify(text), if given,
     sends an interim message (e.g. "reading the sheet…") before a slow step."""
     try:
+        # Answer to "Kya aapka matlab: <customer>?" asked last time?
+        r = _handle_customer_choice(text, user, chat_key, attach_pdf)
+        if r is not None:
+            return r
         # A sheet pasted earlier and still waiting for "ok" / corrections?
         r = sheet_bot.handle_pending(text, user, chat_key, attach_pdf)
         if r is not None:
@@ -125,6 +131,75 @@ def handle(text, user, chat_key=None, attach_pdf=True, notify=None):
         return _handle(text, user, chat_key, attach_pdf)
     except AssistantError as e:
         return Reply('⚠️ ' + e.message, ok=False, data=e.to_dict())
+
+
+_YES = {'yes', 'y', 'haan', 'han', 'ha', 'haa', 'haan ji', 'ji', 'ji haan', 'ok', 'okay', 'sahi', 'sahi hai',
+        'correct', 'yes please', 'theek', 'theek hai', 'thik hai', 'done', 'confirm', 'yep', 'yup', 'hmm'}
+_NO = {'no', 'n', 'nahi', 'nahin', 'na', 'cancel', 'chhodo', 'rehne do', 'stop'}
+
+
+def _norm(t):
+    return re.sub(r'[^a-z0-9 ]+', ' ', (t or '').lower()).split()
+
+
+def _pick_customer(text, suggestions):
+    """Which suggestion the reply means, or None."""
+    low = ' '.join(_norm(text))
+    if low in _YES and len(suggestions) == 1:
+        return suggestions[0]
+    m = re.fullmatch(r'(?:no\.?\s*)?(\d)', low)
+    if m and 1 <= int(m.group(1)) <= len(suggestions):
+        return suggestions[int(m.group(1)) - 1]
+    words = _norm(text)
+    if not words:
+        return None
+    hits = [sg for sg in suggestions if all(any(w2.startswith(w) for w2 in _norm(sg)) for w in words)]
+    return hits[0] if len(hits) == 1 else None
+
+
+def _handle_customer_choice(text, user, chat_key, attach_pdf):
+    key = f'cust:{chat_key}' if chat_key else None
+    p = tokens.get_pending(key)
+    if not p:
+        return None
+    low = ' '.join(_norm(text))
+    if low in _NO:
+        tokens.set_pending(key, None)
+        return Reply('Theek hai, chhod diya. Dobara likhein jab chahein.')
+    choice = _pick_customer(text, p['suggestions'])
+    if choice is None:
+        if low in _YES:
+            return Reply('Kaunsa customer? Number likhein: ' + ', '.join(
+                f'{i}) {sg}' for i, sg in enumerate(p['suggestions'], 1)), ok=False)
+        tokens.set_pending(key, None)          # something else: treat as a new message
+        return None
+    tokens.set_pending(key, None)
+    args = dict(p['args'])
+    args['customer'] = choice
+    return _create(p['kind'], args, user, chat_key, attach_pdf)
+
+
+def _create(kind, args, user, chat_key, attach_pdf):
+    try:
+        doc = core.create_document(kind, args, user['id'])
+    except AssistantError as e:
+        sugg = e.detail.get('suggestions') if e.code == 'customer_not_found' else None
+        if sugg and chat_key:
+            tokens.set_pending(f'cust:{chat_key}', {'kind': kind, 'args': args, 'suggestions': sugg[:5]})
+            if len(sugg) == 1:
+                msg = (f'Customer "{args.get("customer")}" clearly nahi mila. Kya aapka matlab: {sugg[0]}?\n'
+                       '"haan" likhein to isi naam se ban jaayegi, ya "no".')
+            else:
+                msg = (f'Customer "{args.get("customer")}" clearly nahi mila. Kaunsa? Number likhein:\n'
+                       + '\n'.join(f'{i}) {sg}' for i, sg in enumerate(sugg[:5], 1)))
+            return Reply('⚠️ ' + msg, ok=False, data=e.to_dict())
+        raise
+    tokens.remember(chat_key, kind, doc['id'])
+    label = 'Quotation' if kind == QUOTATION else 'Proforma'
+    txt = format_doc(doc, f"✅ {label} {doc['number']} ban gayi ({doc['status']})")
+    if kind == QUOTATION:
+        txt += '\n\nProforma chahiye to likhein: isko proforma bana do'
+    return _with_pdf(doc, txt, attach_pdf)
 
 
 def _handle(text, user, chat_key, attach_pdf):
@@ -146,13 +221,7 @@ def _handle(text, user, chat_key, attach_pdf):
         if not args.get('items'):
             raise AssistantError('Items nahi mile. Har line mein ek item likhein, jaise: '
                                  '10 mtr roller chain 25.4 @ 450', 'invalid_items')
-        doc = core.create_document(kind, args, user['id'])
-        tokens.remember(chat_key, kind, doc['id'])
-        label = 'Quotation' if kind == QUOTATION else 'Proforma'
-        txt = format_doc(doc, f"✅ {label} {doc['number']} ban gayi ({doc['status']})")
-        if kind == QUOTATION:
-            txt += '\n\nProforma chahiye to likhein: isko proforma bana do'
-        return _with_pdf(doc, txt, attach_pdf)
+        return _create(kind, args, user, chat_key, attach_pdf)
 
     if name == 'convert':
         kind, ref = _resolve_ref(intent, chat_key, QUOTATION)

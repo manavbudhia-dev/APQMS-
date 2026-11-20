@@ -74,6 +74,9 @@ _FIELD_RE = re.compile(
     r'order\s*date|po\s*date|status|enquiry\s*no\.?|enquiry|enq\s*no\.?|ref|enquiry\s*date|date|'
     r'contact(?:\s*person)?|phone|mobile|email|gstin|gst|address)\s*[:=]\s*(.+?)\s*$', re.I)
 
+# Same fields written without a colon: "subject chain and spares".
+_FIELD_NOCOLON_RE = re.compile(r'^\s*(subject|notes?|remarks?)\s+(?![:=])(.+?)\s*$', re.I)
+
 _FIELD_KEYS = {
     'customer': 'customer', 'party': 'customer', 'client': 'customer', 'company': 'customer',
     'subject': 'subject', 'sub': 'subject', 'note': 'notes', 'notes': 'notes', 'remark': 'notes',
@@ -205,7 +208,7 @@ def parse(text):
         if kind and (rest or ':' in first) and not _CONTEXT_WORDS.search(header):
             fields, item_chunks = {}, []
             for l in rest:
-                fm = _FIELD_RE.match(l)
+                fm = _FIELD_RE.match(l) or _FIELD_NOCOLON_RE.match(l)
                 if fm:
                     fields[_FIELD_KEYS.get(re.sub(r'[.\s]+', ' ', fm.group(1).lower()).strip(),
                                            'notes')] = fm.group(2)

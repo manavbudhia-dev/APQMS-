@@ -159,3 +159,56 @@ def recall(chat_key):
     finally:
         db.close()
     return (row['kind'], row['doc_id']) if row else (None, None)
+
+
+# ── pending question per chat (e.g. "did you mean customer X?") ──
+PENDING_MINUTES = 30
+
+
+def _ensure_pending():
+    db = get_db()
+    try:
+        db.execute("CREATE TABLE IF NOT EXISTS assistant_pending (chat_key TEXT PRIMARY KEY, "
+                   "payload TEXT NOT NULL, updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)")
+        db.commit()
+    finally:
+        db.close()
+
+
+def set_pending(chat_key, payload):
+    """Store a JSON-able payload for this chat; None clears it."""
+    if not chat_key:
+        return
+    import json
+    _ensure_pending()
+    db = get_db()
+    try:
+        if payload is None:
+            db.execute("DELETE FROM assistant_pending WHERE chat_key=?", (str(chat_key)[:100],))
+        else:
+            db.execute("INSERT INTO assistant_pending (chat_key, payload, updated_at) VALUES (?,?,CURRENT_TIMESTAMP) "
+                       "ON CONFLICT(chat_key) DO UPDATE SET payload=excluded.payload, updated_at=CURRENT_TIMESTAMP",
+                       (str(chat_key)[:100], json.dumps(payload)))
+        db.commit()
+    finally:
+        db.close()
+
+
+def get_pending(chat_key):
+    if not chat_key:
+        return None
+    import json
+    _ensure_pending()
+    db = get_db()
+    try:
+        row = db.execute("SELECT payload FROM assistant_pending WHERE chat_key=? AND "
+                         "updated_at >= datetime('now', ?)",
+                         (str(chat_key)[:100], f'-{PENDING_MINUTES} minutes')).fetchone()
+    finally:
+        db.close()
+    if not row:
+        return None
+    try:
+        return json.loads(row['payload'])
+    except ValueError:
+        return None
