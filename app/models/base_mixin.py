@@ -406,6 +406,7 @@ class BaseMixin:
           </button>
           <ul class="dropdown-menu dropdown-menu-end">
             <li><a class="dropdown-item" href="/settings"><i class="bi bi-gear"></i> Settings</a></li>
+            <li><a class="dropdown-item" href="/settings/api-tokens"><i class="bi bi-plug"></i> API Tokens</a></li>
             <li><a class="dropdown-item" href="/change-password"><i class="bi bi-key"></i> Change Password</a></li>
             {admin_link}
             <li><hr class="dropdown-divider"></li>
