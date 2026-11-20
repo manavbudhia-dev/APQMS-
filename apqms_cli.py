@@ -300,6 +300,7 @@ def cmd_ai_test(args):
     print(f"Model    : {st['model']}")
     print(f"Key      : {'set (' + st['api_key'][:6] + '…)' if st['api_key'] else 'NOT SET'}")
     print(f"Compat   : {st['compat']}")
+    print(f"Protocol : {st['protocol']}")
     ok, reason = extractor.available()
     if not ok:
         raise SystemExit(reason)

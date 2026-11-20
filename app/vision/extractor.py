@@ -80,6 +80,11 @@ class ExtractionResult:
 #   APQMS_AI_COMPAT    auto (default) | on | off — "on" sends only the basic
 #                      Messages API fields; "auto" does that after the
 #                      gateway rejects the full request once.
+#   APQMS_AI_PROTOCOL  auto (default) | anthropic | openai — "openai" sends
+#                      requests to <base>/v1/chat/completions (OpenAI-style
+#                      gateways such as OpenRouter / airouter); "auto" tries
+#                      the Anthropic format first and switches to OpenAI
+#                      format when the gateway answers 404 for /v1/messages.
 def ai_settings():
     base = (os.environ.get('APQMS_AI_BASE_URL') or '').strip().rstrip('/')
     if base.endswith('/v1'):                 # the SDK adds /v1/messages itself
@@ -89,18 +94,24 @@ def ai_settings():
     compat = (os.environ.get('APQMS_AI_COMPAT') or 'auto').strip().lower()
     if compat not in ('auto', 'on', 'off'):
         compat = 'auto'
+    protocol = (os.environ.get('APQMS_AI_PROTOCOL') or 'auto').strip().lower()
+    if protocol not in ('auto', 'anthropic', 'openai'):
+        protocol = 'auto'
+    if not base:                             # Anthropic direct only speaks its own format
+        protocol = 'anthropic'
     try:
         timeout = float(os.environ.get('APQMS_AI_TIMEOUT') or 120)
     except ValueError:
         timeout = 120.0
-    return {'base_url': base, 'api_key': key, 'model': model, 'compat': compat, 'timeout': timeout}
+    return {'base_url': base, 'api_key': key, 'model': model, 'compat': compat, 'timeout': timeout,
+            'protocol': protocol}
 
 
 def available():
     """(ok, reason) — whether extraction can run on this server."""
-    if anthropic is None:
-        return False, 'The Anthropic SDK is not installed (pip install -r requirements-vision.txt).'
     st = ai_settings()
+    if anthropic is None and st['protocol'] != 'openai':
+        return False, 'The Anthropic SDK is not installed (pip install -r requirements-vision.txt).'
     if not (st['api_key'] or os.environ.get('ANTHROPIC_AUTH_TOKEN') or os.environ.get('ANTHROPIC_PROFILE')):
         return False, 'AI key is not set (APQMS_AI_API_KEY or ANTHROPIC_API_KEY in .env).'
     return True, ''
@@ -112,6 +123,8 @@ def make_client():
     (gateways expect one or the other) with the widely supported
     anthropic-version header."""
     st = ai_settings()
+    if _use_openai():
+        return OpenAICompatClient()
     kwargs = {'timeout': st['timeout'], 'max_retries': 1}
     if st['base_url']:
         kwargs['base_url'] = st['base_url']
@@ -126,8 +139,134 @@ def make_client():
 _compat_learned = False
 
 
+# Remembered per process: True once the gateway answered 404 for /v1/messages.
+_openai_learned = False
+
+
+def _use_openai():
+    st = ai_settings()
+    if st['protocol'] == 'openai':
+        return True
+    if st['protocol'] == 'anthropic':
+        return False
+    return _openai_learned
+
+
+# ── OpenAI-compatible gateways (/v1/chat/completions) ────────
+class GatewayHTTPError(Exception):
+    def __init__(self, status, message):
+        super().__init__(f'{status}: {message}')
+        self.status = status
+        self.message = message
+
+
+@dataclass
+class _TextBlock:
+    text: str
+    type: str = 'text'
+
+
+@dataclass
+class _Usage:
+    input_tokens: int = 0
+    output_tokens: int = 0
+
+
+@dataclass
+class _Response:
+    content: list
+    stop_reason: str
+    model: str
+    usage: _Usage
+
+
+_FINISH_MAP = {'stop': 'end_turn', 'length': 'max_tokens', 'content_filter': 'refusal'}
+
+
+def _to_openai_content(content):
+    if isinstance(content, str):
+        return content
+    parts = []
+    for b in content:
+        btype = b.get('type') if isinstance(b, dict) else getattr(b, 'type', '')
+        if btype == 'text':
+            parts.append({'type': 'text', 'text': b['text'] if isinstance(b, dict) else b.text})
+        elif btype == 'image' and isinstance(b, dict):
+            src = b['source']
+            parts.append({'type': 'image_url',
+                          'image_url': {'url': f"data:{src['media_type']};base64,{src['data']}"}})
+    if all(p['type'] == 'text' for p in parts):
+        return '\n'.join(p['text'] for p in parts)
+    return parts
+
+
+class _OpenAIMessages:
+    def __init__(self, owner):
+        self.owner = owner
+
+    def create(self, model, max_tokens, messages, system=None, **_ignored):
+        msgs = []
+        if system:
+            msgs.append({'role': 'system', 'content': system if isinstance(system, str)
+                         else ''.join(b.get('text', '') for b in system)})
+        for m in messages:
+            msgs.append({'role': m['role'], 'content': _to_openai_content(m['content'])})
+        payload = self.owner.post('/v1/chat/completions',
+                                  {'model': model, 'max_tokens': max_tokens, 'messages': msgs})
+        choice = (payload.get('choices') or [{}])[0]
+        msg = choice.get('message') or {}
+        text = msg.get('content') or ''
+        if isinstance(text, list):
+            text = ''.join(p.get('text', '') for p in text if isinstance(p, dict))
+        if msg.get('refusal') and not text:
+            stop = 'refusal'
+        else:
+            stop = _FINISH_MAP.get(choice.get('finish_reason') or 'stop', 'end_turn')
+        u = payload.get('usage') or {}
+        return _Response(content=[_TextBlock(text)], stop_reason=stop, model=payload.get('model') or model,
+                         usage=_Usage(u.get('prompt_tokens') or 0, u.get('completion_tokens') or 0))
+
+
+class OpenAICompatClient:
+    """Minimal client with the `messages.create(...)` shape the extractor
+    uses, speaking the OpenAI Chat Completions format. Standard library
+    only; honours HTTPS_PROXY like any urllib request."""
+
+    def __init__(self, base_url=None, api_key=None, timeout=None):
+        st = ai_settings()
+        self.base_url = (base_url or st['base_url']).rstrip('/')
+        self.api_key = api_key if api_key is not None else st['api_key']
+        self.timeout = timeout or st['timeout']
+        self.messages = _OpenAIMessages(self)
+        self.beta = self
+
+    def post(self, path, body):
+        import urllib.error
+        import urllib.request
+        req = urllib.request.Request(self.base_url + path, data=json.dumps(body).encode('utf-8'), method='POST',
+                                     headers={'Content-Type': 'application/json',
+                                              'Authorization': f'Bearer {self.api_key}',
+                                              'User-Agent': 'apqms-photo-quote/1.0'})
+        try:
+            with urllib.request.urlopen(req, timeout=self.timeout) as r:
+                return json.loads(r.read().decode('utf-8'))
+        except urllib.error.HTTPError as e:
+            raw = e.read().decode('utf-8', 'replace')
+            try:
+                j = json.loads(raw)
+                err = j.get('error')
+                detail = (err.get('message') if isinstance(err, dict) else None) or j.get('message') or raw
+            except ValueError:
+                detail = raw
+            raise GatewayHTTPError(e.code, str(detail)[:300]) from None
+        except (urllib.error.URLError, TimeoutError, OSError) as e:
+            raise GatewayHTTPError(0, str(getattr(e, 'reason', e))) from None
+
+
 def _use_compat():
     st = ai_settings()
+    if _use_openai():
+        return True
     if st['compat'] == 'on':
         return True
     if st['compat'] == 'off':
@@ -293,7 +432,7 @@ def _text_of(response):
 
 def _call(client, messages, system=SYSTEM_PROMPT, compat=False):
     model = ai_settings()['model']
-    if compat:
+    if compat or isinstance(client, OpenAICompatClient):
         # Only the basic Messages API fields, which every Anthropic-compatible
         # gateway accepts; the schema moves into the prompt, and parsing /
         # validation / the one retry catch any formatting slip.
@@ -370,12 +509,22 @@ def _run(client, messages, system, changed):
     usage = {'input_tokens': 0, 'output_tokens': 0}
     last_text, last_err = '', ''
     for attempt in (1, 2):
-        global _compat_learned
-        compat = _use_compat()
+        global _compat_learned, _openai_learned
+        compat = _use_compat() or isinstance(client, OpenAICompatClient)
         try:
             response = _call(client, messages, system, compat)
         except Exception as e:
-            if (not compat and ai_settings()['compat'] == 'auto' and anthropic is not None
+            st = ai_settings()
+            if (st['protocol'] == 'auto' and anthropic is not None and not isinstance(client, OpenAICompatClient)
+                    and isinstance(e, anthropic.NotFoundError) and '/v1/messages' in str(e)):
+                # The gateway has no Anthropic endpoint: speak OpenAI format.
+                _openai_learned = True
+                client = OpenAICompatClient()
+                try:
+                    response = _call(client, messages, system, True)
+                except Exception as e2:
+                    raise ExtractionError(_api_error_message(e2)) from e2
+            elif (not compat and ai_settings()['compat'] == 'auto' and anthropic is not None
                     and isinstance(e, (anthropic.BadRequestError, anthropic.UnprocessableEntityError))):
                 # The gateway didn't accept a newer field (fallbacks, betas,
                 # output_config, cache_control...). Send the basic request.
@@ -418,6 +567,24 @@ def _run(client, messages, system, changed):
 
 
 def _api_error_message(e):
+    if isinstance(e, GatewayHTTPError):
+        gw = ' (gateway, OpenAI format)'
+        d, code = e.message, e.status
+        if code == 0:
+            return (f'AI service tak connection nahi bana ({ai_settings()["base_url"]}): {d}. '
+                    'URL check karein, ya hosting outgoing HTTPS block kar rahi hai.')
+        if code == 401:
+            return f'AI key galat hai ya expire ho gayi{gw}: {d}'
+        if code == 402:
+            return f'Gateway account mein balance / credit nahi{gw}: {d}'
+        if code == 403:
+            return f'Is key ko ye model use karne ki permission nahi{gw}: {d}'
+        if code == 404:
+            return (f'AI service ne 404 diya{gw} — base URL ya model ka naam galat hai '
+                    f'(model: {ai_settings()["model"]}): {d}')
+        if code == 429:
+            return f'AI service busy hai / limit poori{gw}. Ek minute baad try karein. {d}'
+        return f'AI service error {code}{gw}: {d}'
     if anthropic is None:
         return 'AI service error.'
     detail = str(getattr(e, 'message', '') or e)[:300]
@@ -462,7 +629,8 @@ def test_connection(client=None):
     res = extract_text(SAMPLE_SHEET_TEXT, client=client)
     return {'ok': True, 'base_url': st['base_url'] or 'https://api.anthropic.com (direct)',
             'model_requested': st['model'], 'model_reported': res.model,
-            'mode': 'compatibility (basic request)' if _use_compat() else 'full',
+            'mode': ('OpenAI format' if _use_openai() else
+                     'compatibility (basic request)' if _use_compat() else 'full'),
             'rate_per_mtr': res.data.get('rate_per_mtr'), 'quantity_mtrs': res.data.get('quantity_mtrs'),
             'delivery_weeks': res.data.get('delivery_weeks'),
             'needs_review': len(res.data.get('needs_review') or []),

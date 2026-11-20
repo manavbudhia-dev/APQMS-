@@ -22,7 +22,7 @@ try:
 except ImportError:
     anthropic = httpx2 = None
 
-ENV_KEYS = ('APQMS_AI_BASE_URL', 'APQMS_AI_API_KEY', 'APQMS_AI_MODEL', 'APQMS_AI_COMPAT',
+ENV_KEYS = ('APQMS_AI_BASE_URL', 'APQMS_AI_API_KEY', 'APQMS_AI_MODEL', 'APQMS_AI_COMPAT', 'APQMS_AI_PROTOCOL',
             'ANTHROPIC_API_KEY', 'APQMS_VISION_MODEL')
 
 
@@ -41,6 +41,7 @@ class Gateway(unittest.TestCase):
         os.environ.update({'APQMS_AI_BASE_URL': 'https://gw.example.com/v1/', 'APQMS_AI_API_KEY': 'gw-key-123',
                            'APQMS_AI_MODEL': 'claude-opus-4-5'})
         extractor._compat_learned = False
+        extractor._openai_learned = False
         self.requests = []
         self.responses = []
 
@@ -51,6 +52,7 @@ class Gateway(unittest.TestCase):
             else:
                 os.environ[k] = v
         extractor._compat_learned = False
+        extractor._openai_learned = False
 
     def client(self):
         def handler(request):
@@ -131,6 +133,96 @@ class Gateway(unittest.TestCase):
         self.assertEqual((st['base_url'], st['model']), ('', 'claude-opus-5-5'))
         c = extractor.make_client()
         self.assertEqual(str(c.base_url).rstrip('/'), 'https://api.anthropic.com')
+
+
+class _FakeOpenAIGateway:
+    """Stands in for OpenAICompatClient.post: records requests, returns canned JSON."""
+
+    def __init__(self, test):
+        self.test = test
+
+    def __call__(self, client_self, path, body):
+        self.test.requests.append({'url': client_self.base_url + path, 'body': body,
+                                   'key': client_self.api_key})
+        status, payload = self.test.responses.pop(0)
+        if status != 200:
+            raise extractor.GatewayHTTPError(status, payload)
+        return payload
+
+
+def oai_message(text, model='anthropic/claude-haiku-5.5', finish='stop'):
+    return {'model': model, 'choices': [{'message': {'role': 'assistant', 'content': text},
+                                         'finish_reason': finish}],
+            'usage': {'prompt_tokens': 11, 'completion_tokens': 22}}
+
+
+@unittest.skipIf(anthropic is None, 'anthropic SDK not installed')
+class OpenAIFormatGateway(Gateway):
+    def setUp(self):
+        super().setUp()
+        self._orig_post = extractor.OpenAICompatClient.post
+        fake = _FakeOpenAIGateway(self)
+        extractor.OpenAICompatClient.post = lambda client_self, path, body: fake(client_self, path, body)
+
+    def tearDown(self):
+        extractor.OpenAICompatClient.post = self._orig_post
+        super().tearDown()
+
+    # inherited Anthropic-format tests don't apply when protocol is forced
+    test_settings_and_headers = test_auto_switches_to_basic_request = None
+    test_compat_on_and_off = test_readable_errors = test_direct_anthropic_unchanged = None
+
+    def test_forced_openai(self):
+        os.environ['APQMS_AI_PROTOCOL'] = 'openai'
+        c = extractor.make_client()
+        self.assertIsInstance(c, extractor.OpenAICompatClient)
+        self.responses = [(200, oai_message('```json\n' + json.dumps(SAMPLE_GROUND_TRUTH) + '\n```'))]
+        res = extractor.extract_text(extractor.SAMPLE_SHEET_TEXT, client=c)
+        r = self.requests[0]
+        self.assertEqual(r['url'], 'https://gw.example.com/v1/chat/completions')
+        self.assertEqual(r['key'], 'gw-key-123')
+        self.assertEqual(r['body']['messages'][0]['role'], 'system')
+        self.assertIn('"rate_per_mtr"', r['body']['messages'][0]['content'])
+        self.assertIsInstance(r['body']['messages'][1]['content'], str)
+        self.assertEqual(res.data['rate_per_mtr'], 8360)
+        self.assertEqual(res.model, 'anthropic/claude-haiku-5.5')
+        self.assertEqual(res.usage['output_tokens'], 22)
+
+    def test_image_and_retry(self):
+        os.environ['APQMS_AI_PROTOCOL'] = 'openai'
+        png = b'\x89PNG\r\n\x1a\n' + b'0' * 50
+        self.responses = [(200, oai_message('not json')), (200, oai_message(json.dumps(SAMPLE_GROUND_TRUTH)))]
+        extractor.extract(png, client=extractor.make_client(), do_preprocess=False)
+        parts = self.requests[0]['body']['messages'][1]['content']
+        self.assertEqual(parts[0]['type'], 'image_url')
+        self.assertTrue(parts[0]['image_url']['url'].startswith('data:image/png;base64,'))
+        retry = self.requests[1]['body']['messages']
+        self.assertEqual([m['role'] for m in retry], ['system', 'user', 'assistant', 'user'])
+        self.assertEqual(retry[2]['content'], 'not json')
+
+    def test_auto_switch_on_404(self):
+        def handler(request):
+            return httpx2.Response(404, json={'message': 'Route POST:/v1/messages not found',
+                                              'error': 'Not Found', 'statusCode': 404})
+        c = extractor.make_client().with_options(
+            http_client=anthropic.DefaultHttpxClient(transport=httpx2.MockTransport(handler)), max_retries=0)
+        self.responses = [(200, oai_message(json.dumps(SAMPLE_GROUND_TRUTH)))]
+        res = extractor.extract_text(extractor.SAMPLE_SHEET_TEXT, client=c)
+        self.assertEqual(res.data['delivery_weeks'], 8)
+        self.assertTrue(extractor._use_openai())
+        self.assertIsInstance(extractor.make_client(), extractor.OpenAICompatClient)
+
+    def test_openai_errors(self):
+        os.environ['APQMS_AI_PROTOCOL'] = 'openai'
+        self.responses = [(401, 'Missing or invalid API key')]
+        with self.assertRaises(extractor.ExtractionError) as cm:
+            extractor.extract_text(extractor.SAMPLE_SHEET_TEXT, client=extractor.make_client())
+        self.assertIn('key galat', cm.exception.message)
+
+    def test_direct_never_openai(self):
+        os.environ.pop('APQMS_AI_BASE_URL')
+        os.environ['APQMS_AI_PROTOCOL'] = 'openai'
+        self.assertEqual(extractor.ai_settings()['protocol'], 'anthropic')
 
 
 if __name__ == '__main__':
