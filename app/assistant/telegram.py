@@ -11,6 +11,10 @@ Configuration (environment variables):
   APQMS_TELEGRAM_WEBHOOK_SECRET  secret Telegram must echo in the
                                  X-Telegram-Bot-Api-Secret-Token header
                                  (required for webhook mode)
+  APQMS_TELEGRAM_API_URL         optional relay instead of https://api.telegram.org,
+                                 for hosts that block Telegram (see
+                                 tools/telegram_relay/README.md)
+  APQMS_TELEGRAM_RELAY_KEY       sent as X-Relay-Key to that relay
 
 Two ways to run it:
   * webhook  — the server receives updates at POST /api/v1/telegram/webhook
@@ -58,6 +62,18 @@ def bot_user():
     return core.user_by_username(os.environ.get('APQMS_TELEGRAM_USER', 'admin') or 'admin')
 
 
+def api_base():
+    return (os.environ.get('APQMS_TELEGRAM_API_URL') or API).strip().rstrip('/')
+
+
+def _headers(content_type):
+    h = {'Content-Type': content_type, 'User-Agent': 'apqms-bot/1.0'}
+    key = os.environ.get('APQMS_TELEGRAM_RELAY_KEY', '').strip()
+    if key:
+        h['X-Relay-Key'] = key
+    return h
+
+
 def check_webhook_secret(header_value):
     secret = webhook_secret()
     return bool(secret) and hmac.compare_digest(secret, (header_value or '').strip())
@@ -65,9 +81,9 @@ def check_webhook_secret(header_value):
 
 # ── Bot API calls ────────────────────────────────────────────
 def _call(method, params=None, timeout=30):
-    url = f'{API}/bot{bot_token()}/{method}'
+    url = f'{api_base()}/bot{bot_token()}/{method}'
     data = json.dumps(params or {}).encode()
-    req = urllib.request.Request(url, data=data, headers={'Content-Type': 'application/json'})
+    req = urllib.request.Request(url, data=data, headers=_headers('application/json'))
     with urllib.request.urlopen(req, timeout=timeout) as r:
         return json.loads(r.read().decode())
 
@@ -81,8 +97,8 @@ def _send_document(chat_id, filename, content, caption=''):
     parts.append(f'--{boundary}\r\nContent-Disposition: form-data; name="document"; filename="{safe}"\r\n'
                  f'Content-Type: application/pdf\r\n\r\n'.encode() + content + b'\r\n')
     parts.append(f'--{boundary}--\r\n'.encode())
-    req = urllib.request.Request(f'{API}/bot{bot_token()}/sendDocument', data=b''.join(parts),
-                                 headers={'Content-Type': f'multipart/form-data; boundary={boundary}'})
+    req = urllib.request.Request(f'{api_base()}/bot{bot_token()}/sendDocument', data=b''.join(parts),
+                                 headers=_headers(f'multipart/form-data; boundary={boundary}'))
     with urllib.request.urlopen(req, timeout=60) as r:
         return json.loads(r.read().decode())
 
@@ -146,13 +162,21 @@ def diagnose(expected_base_url=''):
     out = []
     if not bot_token():
         return [(False, 'APQMS_TELEGRAM_BOT_TOKEN set nahi hai (.env mein daal kar app restart karein).')]
+    via = api_base()
+    if via != API:
+        out.append((None, f'Relay ke through: {via}'))
     try:
         me = _call('getMe', timeout=15).get('result') or {}
         out.append((True, f"Bot token sahi hai: @{me.get('username')}"))
     except urllib.error.HTTPError as e:
-        return [(False, f'Telegram ne bot token reject kiya (HTTP {e.code}). @BotFather se token dobara copy karein.')]
+        if e.code == 403 and via != API:
+            return out + [(False, 'Relay ne request reject ki (403): APQMS_TELEGRAM_RELAY_KEY galat hai.')]
+        return out + [(False, f'Telegram ne bot token reject kiya (HTTP {e.code}). @BotFather se token dobara copy karein.')]
     except Exception as e:
-        return [(False, f'Server se api.telegram.org tak connection nahi bana: {e}')]
+        if via == API:
+            return [(False, f'Server se api.telegram.org tak connection nahi bana: {e}. Hosting Telegram block kar '
+                            'rahi ho to relay use karein (APQMS_TELEGRAM_API_URL, tools/telegram_relay/README.md).')]
+        return out + [(False, f'Server se relay ({via}) tak connection nahi bana: {e}')]
     try:
         info = _call('getWebhookInfo', timeout=15).get('result') or {}
     except Exception as e:
