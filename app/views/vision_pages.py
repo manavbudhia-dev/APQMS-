@@ -97,7 +97,8 @@ class VisionPagesMixin:
   <h5><i class="bi bi-plug"></i> AI connection</h5>
   <div class="small mb-2">Base URL: <code>{esc(st['base_url'] or 'Anthropic direct')}</code> ·
     Model: <code>{esc(st['model'])}</code> · Key: {'set' if st['api_key'] else '<b class="text-danger">not set</b>'} ·
-    Compat: <code>{esc(st['compat'])}</code></div>
+    Compat: <code>{esc(st['compat'])}</code> ·
+    Protocol: <code>{esc(st['protocol'] + (' → openai' if st['protocol'] == 'auto' and extractor._use_openai() else ''))}</code></div>
   <form method="post" action="/photo-quote/ai-test" onsubmit="this.querySelector('button').disabled=true;this.querySelector('button').innerText='Testing… (20-40 sec)';">
     <input type="hidden" name="csrf_token" value="{esc(csrf)}">
     <button class="btn btn-sm btn-outline-primary" {"disabled" if not ok else ""}><i class="bi bi-lightning"></i> Test AI connection</button>

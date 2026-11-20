@@ -19,9 +19,10 @@ APQMS_AI_BASE_URL=https://your-gateway.example.com     # with or without a trail
 APQMS_AI_API_KEY=your-gateway-key
 APQMS_AI_MODEL=model-name-as-your-gateway-spells-it
 APQMS_AI_COMPAT=auto
+APQMS_AI_PROTOCOL=auto        # auto | anthropic | openai
 ```
-- The gateway must speak the **Anthropic Messages API** (`POST <base>/v1/messages`).
-- The key is sent both as `x-api-key` and as `Authorization: Bearer`, with `anthropic-version: 2023-06-01`.
+- The gateway can speak the **Anthropic Messages API** (`POST <base>/v1/messages`) or the **OpenAI Chat Completions API** (`POST <base>/v1/chat/completions`, key as `Authorization: Bearer`). With `auto`, a 404 for `/v1/messages` switches to the OpenAI format (remembered until restart); set `openai` to go there directly. OpenAI format always uses the basic request (schema in the prompt).
+- Anthropic format: the key is sent both as `x-api-key` and as `Authorization: Bearer`, with `anthropic-version: 2023-06-01`.
 - Gateways often reject Anthropic's newer request fields (fallbacks, structured outputs, prompt caching). With `auto`, the first such rejection switches the app to a basic request, with the JSON schema written into the prompt. The parsing and validation still apply.
 - Check the setup with **Photo Quote → Test AI connection** (admin) or `python3 apqms_cli.py ai-test`. Each test sends one sample sheet (1 paid call).
 
